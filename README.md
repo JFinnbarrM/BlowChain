@@ -2,7 +2,7 @@
 
 This project aims to create a decentralised content distribution designed for live events and environments. 
 
-It uses a hybrid mesh-like network topology between small low-energy devices to share files across very long distances. Each user device can receive the file through BLE communication protocols to trigger playback with visual effects (via a display or leds).
+It uses a hybrid daisychain-like network topology between small low-energy devices to share files across very long distances. Each user device can receive the file through BLE communication protocols to trigger playback with visual effects (via a display or leds).
 
 File acceptance requires a physical gesture from the user, detected through onboard sensors, to enhance interactivity and consent in participation.
 
