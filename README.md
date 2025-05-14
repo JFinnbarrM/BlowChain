@@ -1,6 +1,6 @@
 # Audioworm
 
-This project aims to create a decentralised content distribution designed for live events and environments. 
+This project aims to create a decentralised content distribution system designed for live events and environments. 
 
 It uses a hybrid daisychain-like network topology between small low-energy devices to share files across very long distances. Each user device can receive the file through BLE communication protocols to trigger playback with visual effects (via a display or leds).
 
