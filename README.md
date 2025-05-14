@@ -7,3 +7,9 @@ It uses a hybrid daisychain-like network topology between small low-energy devic
 File acceptance requires a physical gesture from the user, detected through onboard sensors, to enhance interactivity and consent in participation.
 
 User engagement data, such as time of interaction, can be logged and tracked in a blockchain, to enable data analytics for campaign managers or advertisers. This can be used to analyse and develop engagement and participation strategies.
+
+# Team
+
+James McAuley
+Niall Waller
+Dhanan Balasaravanan
