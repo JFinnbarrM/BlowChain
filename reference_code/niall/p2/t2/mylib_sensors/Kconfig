@@ -1,0 +1,35 @@
+
+# Sets a new .config variable "CONFIGURE_MYLIB_RTCC".
+menuconfig MYLIB_SENSORS
+    bool "Enable Sensor Library"
+    default n
+    help
+      Enable the sensor support library
+
+# When "CONFIGURE_MYLIB_SENSORS" is set 
+# it will also activate all of the other
+# configs required for this library.
+if MYLIB_SENSORS
+
+    config SHELL
+        default y
+
+    config SENSOR
+        default y
+
+    config LOG
+        default y
+
+    # config SENSOR_LOG_LEVEL
+    #     default 4
+
+    config SENSOR_ASYNC_API
+        default y
+
+    config HW_STACK_PROTECTION
+        default y
+
+    config I2C
+        default y
+
+endif

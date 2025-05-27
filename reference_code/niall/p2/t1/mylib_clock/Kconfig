@@ -1,0 +1,29 @@
+
+# Sets a new .config variable "CONFIGURE_MYLIB_RTCC".
+menuconfig MYLIB_CLOCK
+    bool "Enable real time clock Library"
+    default n
+    help
+      Enable the real time clock support library
+
+# When "CONFIGURE_MYLIB_CLOCK" is set 
+# it will also activate all of the other
+# configs required for this library.
+if MYLIB_CLOCK
+
+    config SHELL
+        default y
+
+    config LOG
+        default y
+
+    config RTC
+        default y
+
+    config COUNTER
+        default y
+
+    config COUNTER_GECKO_RTCC
+        default y
+
+endif

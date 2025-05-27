@@ -1,0 +1,4 @@
+name: mylib_sampling
+build:
+  cmake: .
+  kconfig: Kconfig

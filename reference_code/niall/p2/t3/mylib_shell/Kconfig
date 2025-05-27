@@ -1,0 +1,16 @@
+# Sets a new .config variable "CONFIGURE_MYLIB_SHELL".
+menuconfig MYLIB_SHELL
+    bool "Enable shell library module."
+    default n
+    help
+      Enable shell library module.
+
+# When "CONFIGURE_MYLIB_SHELL" is set 
+# it will also activate all of the other
+# configs required for this library.
+if MYLIB_SHELL
+
+    config SHELL
+        default y
+
+endif

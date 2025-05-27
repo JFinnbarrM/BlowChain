@@ -1,0 +1,49 @@
+
+// Adapted from build/zephyr/zephyr.dts
+
+// Defines aliases for accessing devices with DT_ALIAS.
+/ {
+    aliases {
+        r-channel = &r_channel;
+        g-channel = &g_channel;
+        b-channel = &b_channel;
+        rgb-pwm = &rgb_pwm;
+    };
+};
+
+// Sets pins PF_0, PF_1, and PF_2 as led's to be used as GPIO's.
+&leds {
+    compatible = "gpio-leds";
+    r_channel: r_channel {
+        gpios = < &gpiof 0 GPIO_ACTIVE_LOW >;
+        label = "RED CHANNEL (PF_0)";
+    };
+    g_channel: g_channel {
+        gpios = < &gpiof 1 GPIO_ACTIVE_LOW >;
+        label = "GREEN CHANNEL (PF_1)";
+    };
+    b_channel: b_channel {
+        gpios = < &gpiof 2 GPIO_ACTIVE_LOW >;
+        label = "BLUE CHANNEL (PF_2)";
+    };
+};
+
+
+// Adapted from zephyr/samples/basic/blinky_pwm/builds/nucleo_l476rg.overlay
+
+// Sets the status of PWM2 from "disabled" to "okay"
+&pwm2 {
+	status = "okay";
+};
+
+// Creates a new pwmleds node and configures PWM2/1 (PA_0).
+/ {
+	pwmleds: pwmleds {
+		compatible = "pwm-leds";
+		status = "okay";
+
+		rgb_pwm: rgb_pwm {
+			pwms = <&pwm2 1 PWM_MSEC(20) PWM_POLARITY_NORMAL>;
+		};
+	};
+};

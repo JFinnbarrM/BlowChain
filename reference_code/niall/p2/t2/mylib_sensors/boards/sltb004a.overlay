@@ -1,0 +1,59 @@
+
+/ {
+    aliases {
+        test-from-lib = &i2c1;
+    };
+};
+
+/* This set selects for ENV_I2C according to schematic*/
+/* supporting PMP280(pressure), Si7021(Humidity/Temp), Si1133(UV/Light) */
+&pinctrl {
+	i2c1_env_default: i2c1_env_default {
+		group1 {
+			psels = <GECKO_PSEL(I2C_SDA, C, 4)>,
+				<GECKO_PSEL(I2C_SCL, C, 5)>,
+				<GECKO_LOC(I2C_SDA, 17)>,
+				<GECKO_LOC(I2C_SCL, 17)>;
+		};
+	};
+};
+
+&i2c1 {
+    status = "okay";
+
+    /* Use the pincntrl we configured */
+    pinctrl-0 = <&i2c1_env_default>;
+
+    /* Set the pincntrl for default use */
+    pinctrl-names = "default";
+
+    /* Disable the ccs811 sensor using I2C1 */
+    ccs811: ccs811@5a {
+        status = "disabled";
+    };
+
+    /* Node for bmp280 -> compatible with bosch_bme280 */
+    bmp280: bmp280@77 {
+        compatible = "bosch,bme280";
+        reg = <0x77>; /* I2C register */
+        supply-gpios = <&gpiof 9 GPIO_ACTIVE_HIGH>;
+        status = "okay";
+    };
+
+    /* Node for si7021 -> compatible with silabs_si7006 */
+	si7021: si7021@40 {
+		compatible = "silabs,si7006";
+		reg = <0x40>; /* I2C register */
+		supply-gpios = <&gpiof 9 GPIO_ACTIVE_HIGH>;
+        status = "okay";
+	};
+
+    /* Node for si1133 -> will need to bitbang */
+    si1133: si1133@55 {
+        /* comatible =  ...with nobody ...forever alone */
+		reg = <0x55>; /* I2C register */
+		supply-gpios = <&gpiof 9 GPIO_ACTIVE_HIGH>;
+        /* irq-gpios = <&gpiof 11 GPIO_ACTIVE_LOW>; ...might not need */
+        status = "okay";
+    };
+};

@@ -1,0 +1,23 @@
+# Sets a new .config variable "CONFIGURE_MYLIB_SAMPLING".
+menuconfig MYLIB_SAMPLING
+    bool "Enable shell library module."
+    default n
+    help
+      Enable shell library module.
+
+# When "MYLIB_SAMPLINGL" is set 
+# it will also activate all of the other
+# configs required for this library:
+if MYLIB_SAMPLING
+
+    config SHELL
+        default y
+
+    config JSON_LIBRARY
+        default y
+
+    # This allows k_malloc to be used and defines a memory pool for it.
+    config HEAP_MEM_POOL_SIZE
+        default 2048
+
+endif

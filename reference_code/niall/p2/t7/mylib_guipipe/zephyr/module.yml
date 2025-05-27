@@ -1,0 +1,4 @@
+name: mylib_guipipe
+build:
+  cmake: .
+  kconfig: Kconfig

@@ -1,0 +1,4 @@
+name: mylib_shell
+build:
+  cmake: .
+  kconfig: Kconfig

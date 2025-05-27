@@ -1,0 +1,4 @@
+name: mylib_sensors
+build:
+  cmake: .
+  kconfig: Kconfig

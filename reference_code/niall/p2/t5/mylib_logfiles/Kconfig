@@ -1,0 +1,23 @@
+# Sets a new .config variable "CONFIGURE_MYLIB_LOGFILES".
+menuconfig MYLIB_LOGFILES
+    bool "Enable shell library module."
+    default n
+    help
+      Enable shell library module.
+
+# When "MYLIB_LOGFILES" is set 
+# it will also activate all of the other
+# configs required for this library:
+if MYLIB_LOGFILES
+
+    config SHELL
+        default y
+
+    # config JSON_LIBRARY
+    #     default y
+
+    # # This allows k_malloc to be used and defines a memory pool for it.
+    # config HEAP_MEM_POOL_SIZE
+    #     default 2048
+
+endif

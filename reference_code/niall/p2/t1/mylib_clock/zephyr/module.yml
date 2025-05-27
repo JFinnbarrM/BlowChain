@@ -1,0 +1,4 @@
+name: mylib_clock
+build:
+  cmake: .
+  kconfig: Kconfig

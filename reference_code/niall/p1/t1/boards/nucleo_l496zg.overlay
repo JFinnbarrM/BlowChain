@@ -1,0 +1,5 @@
+
+// See ed post 'Modifying Platform Device Tree Files #28'.
+&rng {
+    status = "okay";
+};
