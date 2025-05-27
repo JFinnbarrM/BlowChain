@@ -24,10 +24,10 @@ async def write_positions():
         x, y = 0, 0
         while True:
             # Write X position (as 1-byte unsigned integer)
-            await client.write_gatt_char(X_POS_UUID, bytes([x]), response=True)
+            await client.write_gatt_char(X_POS_UUID, bytes([x]), response=False)
             
             # Write Y position
-            await client.write_gatt_char(Y_POS_UUID, bytes([y]), response=True)
+            # await client.write_gatt_char(Y_POS_UUID, bytes([y]), response=False)
             
             print(f"Sent position: ({x}, {y})")
             
@@ -35,7 +35,7 @@ async def write_positions():
             x = (x + 10) % 256
             y = (y + 5) % 256
             
-            await asyncio.sleep(1.0)  # Send every second
+            # await asyncio.sleep(1.0)  # Send every second
 
 if __name__ == "__main__":
     try:
