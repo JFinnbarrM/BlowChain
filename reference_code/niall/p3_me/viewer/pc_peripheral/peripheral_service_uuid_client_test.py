@@ -2,7 +2,7 @@ import asyncio
 from bleak import BleakClient
 
 # Device MAC address (must match your Zephyr device)
-DEVICE_ADDRESS = "dc:78:58:8d:01:42"
+DEVICE_ADDRESS = "dc:80:00:00:08:35"
 
 # UUIDs (must match exactly what's in your Zephyr code)
 SERVICE_UUID = "00000000-0000-0000-0000-000000000000"
