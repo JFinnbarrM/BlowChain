@@ -1430,6 +1430,7 @@ int main(void) {
 
     LOG_INF("Advertising started - ready for connections");
     
+    // k_msleep(5000);
     observer_start();
 
     while (1) {
