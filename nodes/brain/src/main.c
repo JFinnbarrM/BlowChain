@@ -99,7 +99,7 @@ static simple_transaction_t pending_tx_buffer[10];
 static struct bt_conn *current_conn = NULL;
 static char current_username[MAX_USER_ID_LEN] = "UNKNOWN";
 
-#define VOC_PRESENCE_THRESHOLD 500
+#define VOC_PRESENCE_THRESHOLD 250
 static uint16_t current_voc_value = 0;
 static uint32_t last_voc_timestamp = 0;
 
@@ -770,6 +770,48 @@ static ssize_t read_voc_sensor(struct bt_conn *conn, const struct bt_gatt_attr *
     return bt_gatt_attr_read(conn, attr, buf, len, offset, &voc_data, sizeof(voc_data));
 }
 
+// set up for observing thingy
+static const bt_addr_le_t mac_addr_thing = {
+    .type = BT_ADDR_LE_RANDOM,
+    .a = {.val = {0xFF, 0xAA, 0xFF, 0xAA, 0xFF, 0xDA}}  // Reversed from string
+};
+
+// found thingy
+static void device_found(
+    const bt_addr_le_t *addr, 
+    int8_t rssi, 
+    uint8_t type, 
+    struct net_buf_simple *ad
+) {
+    
+    bool is_mac_thing = (bt_addr_le_cmp(addr, &mac_addr_thing) == 0);
+
+    if (is_mac_thing) { 
+        // VOC data is sent as 16-bit value (little endian)
+
+        uint8_t *data = ad->data;
+
+        uint16_t voc_value = (data[25] << 8) | data[26];
+        
+        process_voc_reading(voc_value);
+        
+        LOG_INF("BLE: VOC data received: %d PPB", voc_value);
+
+        return voc_value;
+    }
+}
+
+void observer_start(void)
+{
+  struct bt_le_scan_param scan_param = {
+  .type       = BT_LE_SCAN_TYPE_PASSIVE,
+  .options    = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
+  .interval   = BT_GAP_SCAN_FAST_INTERVAL,
+  .window     = BT_GAP_SCAN_FAST_WINDOW,
+  };
+  bt_le_scan_start(&scan_param, device_found);
+}
+
 BT_GATT_SERVICE_DEFINE(lockbox_svc,
     BT_GATT_PRIMARY_SERVICE(BT_UUID_LOCKBOX_SERVICE),
     
@@ -837,7 +879,7 @@ static bool validate_block(simple_block_t *block) {
 
 static int validate_blockchain(void) {
     LOG_INF("Validating blockchain...");
-    
+        
     for (uint32_t i = 0; i < g_blockchain.total_blocks; i++) {
         simple_block_t *block = &g_blockchain.blocks[i];
         
@@ -951,6 +993,8 @@ int main(void) {
 
     LOG_INF("Advertising successfully started - PC can now connect");
     
+    observer_start();
+
     while (1) {
         k_mutex_lock(&lockbox_mutex, K_FOREVER);
         if (g_lockbox_state.state == STATE_SHUTDOWN) {
