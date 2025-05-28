@@ -1,5 +1,3 @@
-
-
 #include "zephyr/bluetooth/gap.h"
 #include <zephyr/kernel.h>
 #include <zephyr/bluetooth/bluetooth.h>
@@ -35,17 +33,27 @@ static ssize_t write_y_pos(struct bt_conn *conn, const struct bt_gatt_attr *attr
     return len;
 }
 
+// Callback when X is read
+static ssize_t read_x_pos(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t offset) {
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &x_pos, sizeof(x_pos));
+}
+
+// Callback when Y is read
+static ssize_t read_y_pos(struct bt_conn *conn, const struct bt_gatt_attr *attr, void *buf, uint16_t len, uint16_t offset) {
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &y_pos, sizeof(y_pos));
+}
+
 // GATT Service Definition
 BT_GATT_SERVICE_DEFINE(pos_svc,
     BT_GATT_PRIMARY_SERVICE(BT_UUID_POSITION_SERVICE),
     BT_GATT_CHARACTERISTIC(BT_UUID_X_POS, 
-        BT_GATT_CHRC_WRITE,
-        BT_GATT_PERM_WRITE,
-        NULL, write_x_pos, NULL),
+        BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+        BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+        read_x_pos, write_x_pos, &x_pos),
     BT_GATT_CHARACTERISTIC(BT_UUID_Y_POS,
-        BT_GATT_CHRC_WRITE,
-        BT_GATT_PERM_WRITE,
-        NULL, write_y_pos, NULL),
+        BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+        BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+        read_y_pos, write_y_pos, &y_pos),
 );
 
 static const struct bt_data ad[] = {
@@ -57,12 +65,12 @@ static const struct bt_data ad[] = {
 int main(void) {
     int err;
 
-	// Create the MAC address from the string.
-	bt_addr_le_t mobile_addr;
-	bt_addr_le_from_str(static_mac_str, "random", &mobile_addr);
+    // Create the MAC address from the string.
+    bt_addr_le_t mobile_addr;
+    bt_addr_le_from_str(static_mac_str, "random", &mobile_addr);
 
-	// Set the identity address to the MAC address.
-	err = bt_id_create(&mobile_addr, NULL);
+    // Set the identity address to the MAC address.
+    err = bt_id_create(&mobile_addr, NULL);
     if (err < 0) {
         printk("Failed to set static address as identity (ERROR: %d)\n", err);
         return -1;
@@ -85,5 +93,5 @@ int main(void) {
         return -1;
     }
 
-	printk("Advertising successfully started\n");
+    printk("Advertising successfully started\n");
 }
