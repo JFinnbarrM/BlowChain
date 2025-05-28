@@ -117,10 +117,14 @@ static struct k_msgq pending_tx_queue;
 static simple_transaction_t pending_tx_buffer[10];
 static char current_username[MAX_USER_ID_LEN] = "UNKNOWN";
 
+<<<<<<< HEAD
+#define VOC_PRESENCE_THRESHOLD 250
+=======
 static connection_info_t connections[MAX_BLE_CONNECTIONS];
 static struct k_mutex connections_mutex;
 
 #define VOC_PRESENCE_THRESHOLD 500
+>>>>>>> 2179525d9a6bc5e21907a6b95a84eec0f3b3968c
 static uint16_t current_voc_value = 0;
 static uint32_t last_voc_timestamp = 0;
 
@@ -1249,7 +1253,284 @@ SHELL_STATIC_SUBCMD_SET_CREATE(lockbox_cmds,
     SHELL_SUBCMD_SET_END
 );
 
+<<<<<<< HEAD
+SHELL_CMD_REGISTER(lockbox, &lockbox_cmds, "Lockbox blockchain commands", NULL);
+
+static ssize_t write_username(struct bt_conn *conn, const struct bt_gatt_attr *attr, 
+                             const void *buf, uint16_t len, uint16_t offset, uint8_t flags) {
+    if (len >= MAX_USER_ID_LEN) return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+    
+    memset(current_username, 0, MAX_USER_ID_LEN);
+    memcpy(current_username, buf, len);
+    current_username[len] = '\0';
+    
+    generate_passcode(current_username);
+    
+    LOG_INF("BLE: Username set to: %s", current_username);
+    return len;
+}
+
+static ssize_t read_username(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                            void *buf, uint16_t len, uint16_t offset) {
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, current_username, strlen(current_username));
+}
+
+static ssize_t read_block_info(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                              void *buf, uint16_t len, uint16_t offset) {
+    struct {
+        uint32_t total_blocks;
+        uint32_t latest_hash;
+        uint32_t latest_block_id;
+    } block_info;
+    
+    k_mutex_lock(&blockchain_mutex, K_FOREVER);
+    block_info.total_blocks = g_blockchain.total_blocks;
+    block_info.latest_hash = g_blockchain.latest_hash;
+    block_info.latest_block_id = (g_blockchain.total_blocks > 0) ? 
+                                g_blockchain.blocks[g_blockchain.total_blocks - 1].id : 0;
+    k_mutex_unlock(&blockchain_mutex);
+    
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &block_info, sizeof(block_info));
+}
+
+static ssize_t read_lock_status(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                               void *buf, uint16_t len, uint16_t offset) {
+    uint8_t status = lock_is_open() ? 1 : 0;
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &status, sizeof(status));
+}
+
+static ssize_t read_user_status(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                               void *buf, uint16_t len, uint16_t offset) {
+    struct {
+        uint8_t state;
+        uint8_t failed_attempts;
+        uint8_t system_locked;
+        uint8_t tamper_detected;
+    } user_status;
+    
+    k_mutex_lock(&lockbox_mutex, K_FOREVER);
+    user_status.state = (uint8_t)g_lockbox_state.state;
+    user_status.failed_attempts = (uint8_t)g_lockbox_state.failed_attempts;
+    user_status.system_locked = g_lockbox_state.system_locked ? 1 : 0;
+    user_status.tamper_detected = g_lockbox_state.tamper_detected ? 1 : 0;
+    k_mutex_unlock(&lockbox_mutex);
+    
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &user_status, sizeof(user_status));
+}
+
+static ssize_t write_passcode(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                             const void *buf, uint16_t len, uint16_t offset, uint8_t flags) {
+    if (len != 6) return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+    
+    char passcode_str[7];
+    memcpy(passcode_str, buf, 6);
+    passcode_str[6] = '\0';
+    
+    bool success = verify_passcode(current_username, passcode_str);
+    if (success) {
+        lock_open();
+    } else {
+        lock_close();
+    }
+    
+    LOG_INF("BLE: Passcode entered: %s - %s", passcode_str, success ? "SUCCESS" : "FAILED");
+    return len;
+}
+
+static ssize_t read_passcode(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                            void *buf, uint16_t len, uint16_t offset) {
+    k_mutex_lock(&lockbox_mutex, K_FOREVER);
+    char *passcode = g_lockbox_state.current_passcode;
+    k_mutex_unlock(&lockbox_mutex);
+    
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, passcode, strlen(passcode));
+}
+
+// NEW: VOC sensor characteristic handlers
+static ssize_t write_voc_sensor(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                               const void *buf, uint16_t len, uint16_t offset, uint8_t flags) {
+    if (len != 2) return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+    
+    // VOC data is sent as 16-bit value (little endian)
+    uint16_t voc_value = *(uint16_t*)buf;
+    
+    process_voc_reading(voc_value);
+    
+    LOG_INF("BLE: VOC data received: %u PPB", voc_value);
+    return len;
+}
+
+static ssize_t read_voc_sensor(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                              void *buf, uint16_t len, uint16_t offset) {
+    struct {
+        uint16_t current_voc;
+        uint16_t threshold;
+        uint32_t timestamp;
+    } voc_data;
+    
+    voc_data.current_voc = current_voc_value;
+    voc_data.threshold = VOC_PRESENCE_THRESHOLD;
+    voc_data.timestamp = last_voc_timestamp;
+    
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &voc_data, sizeof(voc_data));
+}
+
+// set up for observing thingy
+static const bt_addr_le_t mac_addr_thing = {
+    .type = BT_ADDR_LE_RANDOM,
+    .a = {.val = {0xFF, 0xAA, 0xFF, 0xAA, 0xFF, 0xDA}}  // Reversed from string
+};
+
+// found thingy
+static void device_found(
+    const bt_addr_le_t *addr, 
+    int8_t rssi, 
+    uint8_t type, 
+    struct net_buf_simple *ad
+) {
+    
+    bool is_mac_thing = (bt_addr_le_cmp(addr, &mac_addr_thing) == 0);
+
+    if (is_mac_thing) { 
+        // VOC data is sent as 16-bit value (little endian)
+
+        uint8_t *data = ad->data;
+
+        uint16_t voc_value = (data[25] << 8) | data[26];
+        
+        process_voc_reading(voc_value);
+        
+        LOG_INF("BLE: VOC data received: %d PPB", voc_value);
+
+        return voc_value;
+    }
+}
+
+void observer_start(void)
+{
+  struct bt_le_scan_param scan_param = {
+  .type       = BT_LE_SCAN_TYPE_PASSIVE,
+  .options    = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
+  .interval   = BT_GAP_SCAN_FAST_INTERVAL,
+  .window     = BT_GAP_SCAN_FAST_WINDOW,
+  };
+  bt_le_scan_start(&scan_param, device_found);
+}
+
+BT_GATT_SERVICE_DEFINE(lockbox_svc,
+    BT_GATT_PRIMARY_SERVICE(BT_UUID_LOCKBOX_SERVICE),
+    
+    BT_GATT_CHARACTERISTIC(BT_UUID_USERNAME, 
+        BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+        BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+        read_username, write_username, NULL),
+        
+    BT_GATT_CHARACTERISTIC(BT_UUID_BLOCK_INFO,
+        BT_GATT_CHRC_READ,
+        BT_GATT_PERM_READ,
+        read_block_info, NULL, NULL),
+        
+    BT_GATT_CHARACTERISTIC(BT_UUID_LOCK_STATUS,
+        BT_GATT_CHRC_READ,
+        BT_GATT_PERM_READ,
+        read_lock_status, NULL, NULL),
+        
+    BT_GATT_CHARACTERISTIC(BT_UUID_USER_STATUS,
+        BT_GATT_CHRC_READ,
+        BT_GATT_PERM_READ,
+        read_user_status, NULL, NULL),
+        
+    BT_GATT_CHARACTERISTIC(BT_UUID_PASSCODE,
+        BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+        BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+        read_passcode, write_passcode, NULL),
+        
+    // NEW: VOC sensor characteristic
+    BT_GATT_CHARACTERISTIC(BT_UUID_VOC_SENSOR,
+        BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+        BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+        read_voc_sensor, write_voc_sensor, NULL),
+);
+
+static const struct bt_data ad[] = {
+    BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR),
+    BT_DATA_BYTES(BT_DATA_NAME_COMPLETE, "SecureLockbox"),
+    BT_DATA_BYTES(BT_DATA_UUID16_ALL, 0x34, 0x12),
+};
+
+static bool validate_block(simple_block_t *block) {
+    uint32_t calculated_hash = calculate_block_hash(block);
+    if (calculated_hash != block->block_hash) {
+        LOG_ERR("Block %u hash mismatch", block->id);
+        return false;
+    }
+    
+    if (block->block_hash > 0x0000FFFF) {
+        LOG_ERR("Block %u invalid proof of work", block->id);
+        return false;
+    }
+    
+    for (int i = 0; i < block->tx_count; i++) {
+        simple_transaction_t *tx = &block->transactions[i];
+        uint32_t tx_hash = simple_hash(tx, sizeof(simple_transaction_t) - sizeof(tx->hash));
+        if (tx_hash != tx->hash) {
+            LOG_ERR("Transaction %d in block %u has invalid hash", i, block->id);
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+static int validate_blockchain(void) {
+    LOG_INF("Validating blockchain...");
+        
+    for (uint32_t i = 0; i < g_blockchain.total_blocks; i++) {
+        simple_block_t *block = &g_blockchain.blocks[i];
+        
+        if (!validate_block(block)) {
+            LOG_ERR("Block %u validation failed", block->id);
+            return -1;
+        }
+        
+        if (i > 0) {
+            simple_block_t *prev_block = &g_blockchain.blocks[i - 1];
+            if (block->prev_hash != prev_block->block_hash) {
+                LOG_ERR("Block %u has invalid previous hash", block->id);
+                return -1;
+            }
+        }
+    }
+    
+    LOG_INF("Blockchain validation successful");
+    return 0;
+}
+
+static void connected(struct bt_conn *conn, uint8_t err) {
+    if (err) {
+        LOG_ERR("BLE Connection failed (err 0x%02x)", err);
+        return;
+    }
+    
+    current_conn = bt_conn_ref(conn);
+    LOG_INF("BLE PC Connected");
+}
+
+static void disconnected(struct bt_conn *conn, uint8_t reason) {
+    if (current_conn) {
+        bt_conn_unref(current_conn);
+        current_conn = NULL;
+    }
+    LOG_INF("BLE PC Disconnected (reason 0x%02x)", reason);
+}
+
+BT_CONN_CB_DEFINE(conn_callbacks) = {
+    .connected = connected,
+    .disconnected = disconnected,
+};
+=======
 SHELL_CMD_REGISTER(lockbox, &lockbox_cmds, "Lockbox commands", NULL);
+>>>>>>> 2179525d9a6bc5e21907a6b95a84eec0f3b3968c
 
 // Main function
 int main(void) {
@@ -1323,6 +1604,8 @@ int main(void) {
 
     LOG_INF("Advertising started - ready for connections");
     
+    observer_start();
+
     while (1) {
         k_sleep(K_MSEC(5000));
         LOG_INF("System running - VOC: %u PPB, Blocks: %u", 
