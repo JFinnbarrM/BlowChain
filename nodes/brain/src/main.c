@@ -1,4 +1,5 @@
 #include "lock.h"
+#include "zephyr/bluetooth/gap.h"
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/fs/fs.h>
@@ -6,23 +7,39 @@
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
+#include <zephyr/bluetooth/bluetooth.h>
+#include <zephyr/bluetooth/gatt.h>
+#include <zephyr/bluetooth/uuid.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 
 LOG_MODULE_REGISTER(blockchain, LOG_LEVEL_INF);
 
-/* Configuration */
+static char* static_mac_str = "dc:80:00:00:08:35";
+
 #define MAX_TRANSACTIONS_PER_BLOCK 3
 #define MAX_USER_ID_LEN 16
 #define MAX_DATA_LEN 32
 #define BLOCKCHAIN_FILE "/lfs/chain.dat"
 #define MAX_BLOCKS 20
-#define HASH_SIZE 8  /* Simplified hash size */
+#define HASH_SIZE 8
 #define MAX_FAILED_ATTEMPTS 3
 #define PASSCODE_LEN 6
 
-/* Transaction Types */
+#define BT_UUID_LOCKBOX_SERVICE \
+    BT_UUID_DECLARE_128(0x12, 0x34, 0x56, 0x78, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc)
+#define BT_UUID_USERNAME \
+    BT_UUID_DECLARE_128(0xAA, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01)
+#define BT_UUID_BLOCK_INFO \
+    BT_UUID_DECLARE_128(0xBB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02)
+#define BT_UUID_LOCK_STATUS \
+    BT_UUID_DECLARE_128(0xCC, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03)
+#define BT_UUID_USER_STATUS \
+    BT_UUID_DECLARE_128(0xDD, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04)
+#define BT_UUID_PASSCODE \
+    BT_UUID_DECLARE_128(0xEE, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05)
+
 typedef enum {
     TX_USER_ADDED = 1,
     TX_ACCESS_GRANTED,
@@ -36,7 +53,6 @@ typedef enum {
     TX_SYSTEM_STARTUP
 } transaction_type_t;
 
-/* System States */
 typedef enum {
     STATE_READY = 0,
     STATE_PRESENCE_DETECTED,
@@ -45,7 +61,6 @@ typedef enum {
     STATE_SHUTDOWN
 } system_state_t;
 
-/* Simplified Data Structures */
 typedef struct {
     uint32_t timestamp;
     transaction_type_t type;
@@ -70,7 +85,6 @@ typedef struct {
     simple_block_t blocks[MAX_BLOCKS];
 } blockchain_data_t;
 
-/* Lockbox State */
 typedef struct {
     system_state_t state;
     char current_passcode[PASSCODE_LEN + 1];
@@ -81,21 +95,21 @@ typedef struct {
     bool system_locked;
 } lockbox_state_t;
 
-/* Global Variables */
 static blockchain_data_t g_blockchain;
 static lockbox_state_t g_lockbox_state = {0};
 static struct k_mutex blockchain_mutex;
 static struct k_mutex lockbox_mutex;
 static struct k_msgq pending_tx_queue;
 static simple_transaction_t pending_tx_buffer[10];
+static struct bt_conn *current_conn = NULL;
+static char current_username[MAX_USER_ID_LEN] = "UNKNOWN";
 
-/* Forward Declarations */
 static int create_genesis_block(void);
 static int save_blockchain(void);
 static int load_blockchain(void);
 static void send_alert_to_dashboard(const char *message);
+static int reset_blockchain(void);
 
-/* File System Setup */
 FS_LITTLEFS_DECLARE_DEFAULT_CONFIG(storage);
 static struct fs_mount_t blockchain_fs_mount = {
     .type = FS_LITTLEFS,
@@ -104,29 +118,25 @@ static struct fs_mount_t blockchain_fs_mount = {
     .mnt_point = "/lfs",
 };
 
-/* Simple Hash Function (Custom implementation) */
 static uint32_t simple_hash(const void *data, size_t len) {
     const uint8_t *bytes = (const uint8_t *)data;
-    uint32_t hash = 0x811c9dc5; /* FNV offset basis */
+    uint32_t hash = 0x811c9dc5;
     
     for (size_t i = 0; i < len; i++) {
         hash ^= bytes[i];
-        hash *= 0x01000193; /* FNV prime */
+        hash *= 0x01000193;
     }
     
     return hash;
 }
 
-/* Calculate Block Hash */
 static uint32_t calculate_block_hash(simple_block_t *block) {
-    /* Hash everything except the block_hash field itself */
     size_t hash_len = sizeof(simple_block_t) - sizeof(block->block_hash);
     return simple_hash(block, hash_len);
 }
 
-/* Mine Block (Simplified Proof of Work) */
 static void mine_block(simple_block_t *block) {
-    const uint32_t difficulty = 0x0000FFFF; /* Target: hash must be less than this */
+    const uint32_t difficulty = 0x0000FFFF;
     
     LOG_INF("Mining block %u...", block->id);
     
@@ -140,7 +150,6 @@ static void mine_block(simple_block_t *block) {
             block->id, block->nonce, block->block_hash);
 }
 
-/* File I/O Functions */
 static int save_blockchain(void) {
     struct fs_file_t file;
     int ret;
@@ -191,7 +200,6 @@ static int load_blockchain(void) {
     return 0;
 }
 
-/* Blockchain Core Functions */
 static int create_genesis_block(void) {
     memset(&g_blockchain, 0, sizeof(blockchain_data_t));
     
@@ -201,7 +209,6 @@ static int create_genesis_block(void) {
     genesis->prev_hash = 0;
     genesis->tx_count = 1;
     
-    /* Genesis transaction */
     simple_transaction_t *tx = &genesis->transactions[0];
     tx->timestamp = genesis->timestamp;
     tx->type = TX_SYSTEM_STARTUP;
@@ -209,7 +216,6 @@ static int create_genesis_block(void) {
     strcpy(tx->data, "Genesis Block Created");
     tx->hash = simple_hash(tx, sizeof(simple_transaction_t) - sizeof(tx->hash));
     
-    /* Mine genesis block */
     mine_block(genesis);
     
     g_blockchain.total_blocks = 1;
@@ -254,15 +260,12 @@ static int create_new_block(simple_transaction_t *transactions, int tx_count) {
     new_block->prev_hash = g_blockchain.latest_hash;
     new_block->tx_count = tx_count;
     
-    /* Copy transactions */
     for (int i = 0; i < tx_count; i++) {
         new_block->transactions[i] = transactions[i];
     }
     
-    /* Mine the block */
     mine_block(new_block);
     
-    /* Update blockchain state */
     g_blockchain.total_blocks++;
     g_blockchain.latest_hash = new_block->block_hash;
     
@@ -270,16 +273,15 @@ static int create_new_block(simple_transaction_t *transactions, int tx_count) {
     return save_blockchain();
 }
 
-/* Lockbox Functions */
 static void generate_passcode(const char *user_id) {
     k_mutex_lock(&lockbox_mutex, K_FOREVER);
     
-    /* Generate simple 6-digit passcode */
     uint32_t seed = k_uptime_get_32();
     snprintf(g_lockbox_state.current_passcode, sizeof(g_lockbox_state.current_passcode), 
              "%06u", (seed % 1000000));
     
     strcpy(g_lockbox_state.current_user, user_id);
+    strcpy(current_username, user_id);
     g_lockbox_state.passcode_timestamp = k_uptime_get_32();
     g_lockbox_state.state = STATE_READY;
     g_lockbox_state.failed_attempts = 0;
@@ -287,7 +289,7 @@ static void generate_passcode(const char *user_id) {
     k_mutex_unlock(&lockbox_mutex);
     
     char data[MAX_DATA_LEN];
-    snprintf(data, sizeof(data), "Passcode generated: %s", g_lockbox_state.current_passcode);
+    snprintf(data, sizeof(data), "Passcode: %s", g_lockbox_state.current_passcode);
     add_transaction(TX_PASSCODE_GENERATED, user_id, data);
     
     LOG_INF("Passcode generated for %s: %s", user_id, g_lockbox_state.current_passcode);
@@ -330,7 +332,7 @@ static bool verify_passcode(const char *user_id, const char *entered_code) {
         g_lockbox_state.failed_attempts = 0;
         k_mutex_unlock(&lockbox_mutex);
         
-        add_transaction(TX_PASSCODE_VERIFIED, user_id, "Access granted - passcode verified");
+        add_transaction(TX_PASSCODE_VERIFIED, user_id, "Access granted");
         LOG_INF("Access granted for %s", user_id);
         return true;
     } else {
@@ -345,7 +347,7 @@ static bool verify_passcode(const char *user_id, const char *entered_code) {
             g_lockbox_state.system_locked = true;
             k_mutex_unlock(&lockbox_mutex);
             
-            add_transaction(TX_SYSTEM_LOCKED, user_id, "System locked - max failed attempts");
+            add_transaction(TX_SYSTEM_LOCKED, user_id, "System locked");
             send_alert_to_dashboard("ALERT: Maximum failed attempts reached - System locked");
             LOG_ERR("System locked due to failed attempts");
         } else {
@@ -370,9 +372,7 @@ static void trigger_tamper_alert(void) {
 }
 
 static void send_alert_to_dashboard(const char *message) {
-    /* Placeholder for actual dashboard communication */
     LOG_ERR("DASHBOARD ALERT: %s", message);
-    /* In real implementation, this would send HTTP/MQTT message */
 }
 
 static int reset_blockchain(void) {
@@ -381,29 +381,23 @@ static int reset_blockchain(void) {
     
     LOG_WRN("Resetting blockchain and lockbox state...");
     
-    /* Clear in-memory blockchain data */
     memset(&g_blockchain, 0, sizeof(blockchain_data_t));
     
-    /* Reset lockbox state */
     memset(&g_lockbox_state, 0, sizeof(lockbox_state_t));
     g_lockbox_state.state = STATE_READY;
     
-    /* Clear pending transaction queue */
     while (k_msgq_get(&pending_tx_queue, &(simple_transaction_t){0}, K_NO_WAIT) == 0) {
-        /* Empty the queue */
     }
     
     k_mutex_unlock(&lockbox_mutex);
     k_mutex_unlock(&blockchain_mutex);
     
-    /* Delete the blockchain file */
     int ret = fs_unlink(BLOCKCHAIN_FILE);
     if (ret < 0 && ret != -ENOENT) {
         LOG_ERR("Failed to delete blockchain file: %d", ret);
         return ret;
     }
     
-    /* Create new genesis block */
     ret = create_genesis_block();
     if (ret < 0) {
         LOG_ERR("Failed to create new genesis block: %d", ret);
@@ -414,7 +408,6 @@ static int reset_blockchain(void) {
     return 0;
 }
 
-/* Background Processing Thread */
 static void blockchain_processor(void) {
     simple_transaction_t pending_txs[MAX_TRANSACTIONS_PER_BLOCK];
     int tx_count = 0;
@@ -424,13 +417,11 @@ static void blockchain_processor(void) {
     while (1) {
         simple_transaction_t tx;
         
-        /* Collect transactions */
         if (k_msgq_get(&pending_tx_queue, &tx, K_MSEC(10000)) == 0) {
             k_mutex_lock(&blockchain_mutex, K_FOREVER);
             pending_txs[tx_count++] = tx;
             k_mutex_unlock(&blockchain_mutex);
             
-            /* Create block when full */
             if (tx_count >= MAX_TRANSACTIONS_PER_BLOCK) {
                 k_mutex_lock(&blockchain_mutex, K_FOREVER);
                 create_new_block(pending_txs, tx_count);
@@ -438,7 +429,6 @@ static void blockchain_processor(void) {
                 k_mutex_unlock(&blockchain_mutex);
             }
         } else if (tx_count > 0) {
-            /* Timeout - create block with pending transactions */
             k_mutex_lock(&blockchain_mutex, K_FOREVER);
             create_new_block(pending_txs, tx_count);
             tx_count = 0;
@@ -452,7 +442,6 @@ static void blockchain_processor(void) {
 K_THREAD_DEFINE(blockchain_thread, 2048, blockchain_processor, 
                 NULL, NULL, NULL, K_PRIO_COOP(7), 0, 0);
 
-/* Shell Commands */
 static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
     k_mutex_lock(&lockbox_mutex, K_FOREVER);
     k_mutex_lock(&blockchain_mutex, K_FOREVER);
@@ -468,6 +457,7 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
     shell_print(sh, "Failed Attempts: %u/3", g_lockbox_state.failed_attempts);
     shell_print(sh, "System Locked: %s", g_lockbox_state.system_locked ? "YES" : "NO");
     shell_print(sh, "Tamper Detected: %s", g_lockbox_state.tamper_detected ? "YES" : "NO");
+    shell_print(sh, "Lock Status: %s", lock_is_open() ? "OPEN" : "CLOSED");
     
     shell_print(sh, "\n=== Blockchain Status ===");
     shell_print(sh, "Total Blocks: %u", g_blockchain.total_blocks);
@@ -531,7 +521,6 @@ static int cmd_blockchain_stats(const struct shell *sh, size_t argc, char **argv
     shell_print(sh, "Total Blocks: %u", g_blockchain.total_blocks);
     shell_print(sh, "Latest Hash: 0x%08x", g_blockchain.latest_hash);
     
-    /* Count transactions by type */
     int user_adds = 0, access_granted = 0, access_denied = 0, presence = 0;
     int passcode_gen = 0, passcode_ok = 0, passcode_fail = 0, tamper = 0, locked = 0;
     
@@ -568,8 +557,6 @@ static int cmd_reset(const struct shell *sh, size_t argc, char **argv) {
     shell_print(sh, "WARNING: This will permanently delete the blockchain!");
     shell_print(sh, "Type 'YES' to confirm reset:");
     
-    /* In a real implementation, you'd want proper confirmation */
-    /* For now, we'll just reset directly */
     if (argc > 1 && strcmp(argv[1], "YES") == 0) {
         int ret = reset_blockchain();
         if (ret == 0) {
@@ -609,7 +596,6 @@ static int cmd_history(const struct shell *sh, size_t argc, char **argv) {
     return 0;
 }
 
-/* Shell command definitions */
 SHELL_STATIC_SUBCMD_SET_CREATE(lockbox_cmds,
     SHELL_CMD(status, NULL, "Show lockbox and blockchain status", cmd_status),
     SHELL_CMD(generate_passcode, NULL, "Generate passcode for user", cmd_generate_passcode),
@@ -624,22 +610,143 @@ SHELL_STATIC_SUBCMD_SET_CREATE(lockbox_cmds,
 
 SHELL_CMD_REGISTER(lockbox, &lockbox_cmds, "Lockbox blockchain commands", NULL);
 
-/* Validation Functions */
+static ssize_t write_username(struct bt_conn *conn, const struct bt_gatt_attr *attr, 
+                             const void *buf, uint16_t len, uint16_t offset, uint8_t flags) {
+    if (len >= MAX_USER_ID_LEN) return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+    
+    memset(current_username, 0, MAX_USER_ID_LEN);
+    memcpy(current_username, buf, len);
+    current_username[len] = '\0';
+    
+    generate_passcode(current_username);
+    
+    LOG_INF("BLE: Username set to: %s", current_username);
+    return len;
+}
+
+static ssize_t read_username(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                            void *buf, uint16_t len, uint16_t offset) {
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, current_username, strlen(current_username));
+}
+
+static ssize_t read_block_info(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                              void *buf, uint16_t len, uint16_t offset) {
+    struct {
+        uint32_t total_blocks;
+        uint32_t latest_hash;
+        uint32_t latest_block_id;
+    } block_info;
+    
+    k_mutex_lock(&blockchain_mutex, K_FOREVER);
+    block_info.total_blocks = g_blockchain.total_blocks;
+    block_info.latest_hash = g_blockchain.latest_hash;
+    block_info.latest_block_id = (g_blockchain.total_blocks > 0) ? 
+                                g_blockchain.blocks[g_blockchain.total_blocks - 1].id : 0;
+    k_mutex_unlock(&blockchain_mutex);
+    
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &block_info, sizeof(block_info));
+}
+
+static ssize_t read_lock_status(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                               void *buf, uint16_t len, uint16_t offset) {
+    uint8_t status = lock_is_open() ? 1 : 0;
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &status, sizeof(status));
+}
+
+static ssize_t read_user_status(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                               void *buf, uint16_t len, uint16_t offset) {
+    struct {
+        uint8_t state;
+        uint8_t failed_attempts;
+        uint8_t system_locked;
+        uint8_t tamper_detected;
+    } user_status;
+    
+    k_mutex_lock(&lockbox_mutex, K_FOREVER);
+    user_status.state = (uint8_t)g_lockbox_state.state;
+    user_status.failed_attempts = (uint8_t)g_lockbox_state.failed_attempts;
+    user_status.system_locked = g_lockbox_state.system_locked ? 1 : 0;
+    user_status.tamper_detected = g_lockbox_state.tamper_detected ? 1 : 0;
+    k_mutex_unlock(&lockbox_mutex);
+    
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &user_status, sizeof(user_status));
+}
+
+static ssize_t write_passcode(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                             const void *buf, uint16_t len, uint16_t offset, uint8_t flags) {
+    if (len != 6) return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+    
+    char passcode_str[7];
+    memcpy(passcode_str, buf, 6);
+    passcode_str[6] = '\0';
+    
+    bool success = verify_passcode(current_username, passcode_str);
+    if (success) {
+        lock_open();
+    } else {
+        lock_close();
+    }
+    
+    LOG_INF("BLE: Passcode entered: %s - %s", passcode_str, success ? "SUCCESS" : "FAILED");
+    return len;
+}
+
+static ssize_t read_passcode(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                            void *buf, uint16_t len, uint16_t offset) {
+    k_mutex_lock(&lockbox_mutex, K_FOREVER);
+    char *passcode = g_lockbox_state.current_passcode;
+    k_mutex_unlock(&lockbox_mutex);
+    
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, passcode, strlen(passcode));
+}
+
+BT_GATT_SERVICE_DEFINE(lockbox_svc,
+    BT_GATT_PRIMARY_SERVICE(BT_UUID_LOCKBOX_SERVICE),
+    
+    BT_GATT_CHARACTERISTIC(BT_UUID_USERNAME, 
+        BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+        BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+        read_username, write_username, NULL),
+        
+    BT_GATT_CHARACTERISTIC(BT_UUID_BLOCK_INFO,
+        BT_GATT_CHRC_READ,
+        BT_GATT_PERM_READ,
+        read_block_info, NULL, NULL),
+        
+    BT_GATT_CHARACTERISTIC(BT_UUID_LOCK_STATUS,
+        BT_GATT_CHRC_READ,
+        BT_GATT_PERM_READ,
+        read_lock_status, NULL, NULL),
+        
+    BT_GATT_CHARACTERISTIC(BT_UUID_USER_STATUS,
+        BT_GATT_CHRC_READ,
+        BT_GATT_PERM_READ,
+        read_user_status, NULL, NULL),
+        
+    BT_GATT_CHARACTERISTIC(BT_UUID_PASSCODE,
+        BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+        BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+        read_passcode, write_passcode, NULL),
+);
+
+static const struct bt_data ad[] = {
+    BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR),
+    BT_DATA_BYTES(BT_DATA_NAME_COMPLETE, "SecureLockbox"),
+    BT_DATA(BT_DATA_UUID128_ALL, BT_UUID_LOCKBOX_SERVICE, 16),
+};
+
 static bool validate_block(simple_block_t *block) {
-    /* Check hash integrity */
     uint32_t calculated_hash = calculate_block_hash(block);
     if (calculated_hash != block->block_hash) {
         LOG_ERR("Block %u hash mismatch", block->id);
         return false;
     }
     
-    /* Check proof of work */
     if (block->block_hash > 0x0000FFFF) {
         LOG_ERR("Block %u invalid proof of work", block->id);
         return false;
     }
     
-    /* Validate transactions */
     for (int i = 0; i < block->tx_count; i++) {
         simple_transaction_t *tx = &block->transactions[i];
         uint32_t tx_hash = simple_hash(tx, sizeof(simple_transaction_t) - sizeof(tx->hash));
@@ -663,7 +770,6 @@ static int validate_blockchain(void) {
             return -1;
         }
         
-        /* Check chain linkage (except genesis) */
         if (i > 0) {
             simple_block_t *prev_block = &g_blockchain.blocks[i - 1];
             if (block->prev_hash != prev_block->block_hash) {
@@ -677,17 +783,51 @@ static int validate_blockchain(void) {
     return 0;
 }
 
-/* Main Function */
+static void connected(struct bt_conn *conn, uint8_t err) {
+    if (err) {
+        LOG_ERR("BLE Connection failed (err 0x%02x)", err);
+        return;
+    }
+    
+    current_conn = bt_conn_ref(conn);
+    LOG_INF("BLE PC Connected");
+}
+
+static void disconnected(struct bt_conn *conn, uint8_t reason) {
+    if (current_conn) {
+        bt_conn_unref(current_conn);
+        current_conn = NULL;
+    }
+    LOG_INF("BLE PC Disconnected (reason 0x%02x)", reason);
+}
+
+BT_CONN_CB_DEFINE(conn_callbacks) = {
+    .connected = connected,
+    .disconnected = disconnected,
+};
+
 int main(void) {
+    int err;
+
+    bt_addr_le_t mobile_addr;
+    bt_addr_le_from_str(static_mac_str, "random", &mobile_addr);
+
+    err = bt_id_create(&mobile_addr, NULL);
+    if (err < 0) {
+        LOG_ERR("Failed to set static address as identity (ERROR: %d)", err);
+        return -1;
+    } else {
+        LOG_INF("Static address (%s) set as identity", static_mac_str);
+    }
+
     LOG_INF("BlowChain Lockbox System Starting...");
     lock_init();
-    /* Check if filesystem is already mounted (auto-mount from device tree) */
+    
     struct fs_statvfs stats;
     int ret = fs_statvfs("/lfs", &stats);
     if (ret == 0) {
         LOG_INF("Filesystem already mounted (auto-mount)");
     } else {
-        /* Try manual mount if auto-mount failed */
         ret = fs_mount(&blockchain_fs_mount);
         if (ret < 0) {
             LOG_ERR("Failed to mount filesystem: %d", ret);
@@ -696,24 +836,20 @@ int main(void) {
         LOG_INF("Filesystem mounted manually");
     }
     
-    /* Initialize synchronization */
     k_mutex_init(&blockchain_mutex);
     k_mutex_init(&lockbox_mutex);
     k_msgq_init(&pending_tx_queue, (char *)pending_tx_buffer,
                 sizeof(simple_transaction_t), 10);
     
-    /* Initialize lockbox state */
     memset(&g_lockbox_state, 0, sizeof(lockbox_state_t));
     g_lockbox_state.state = STATE_READY;
     
-    /* Load or create blockchain */
     ret = load_blockchain();
     if (ret < 0) {
         LOG_ERR("Failed to initialize blockchain: %d", ret);
         return ret;
     }
     
-    /* Validate existing blockchain */
     if (validate_blockchain() < 0) {
         LOG_ERR("Blockchain validation failed!");
         return -1;
@@ -723,10 +859,23 @@ int main(void) {
     LOG_INF("Blockchain has %u blocks", g_blockchain.total_blocks);
     LOG_INF("Use 'lockbox status' to check system status");
     LOG_INF("Use 'lockbox generate_passcode <user>' to start workflow");
+
+    err = bt_enable(NULL);
+    if (err) {
+        LOG_ERR("Bluetooth init failed (err %d)", err);
+        return -1;
+    }
+    LOG_INF("BLE Lockbox ready for PC connection");
+
+    err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), NULL, 0);
+    if (err) {
+        LOG_ERR("Advertising failed (err %d)", err);
+        return -1;
+    }
+
+    LOG_INF("Advertising successfully started - PC can now connect");
     
-    /* Keep system running */
     while (1) {
-        /* Check for system shutdown conditions */
         k_mutex_lock(&lockbox_mutex, K_FOREVER);
         if (g_lockbox_state.state == STATE_SHUTDOWN) {
             k_mutex_unlock(&lockbox_mutex);
