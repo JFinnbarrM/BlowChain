@@ -267,72 +267,69 @@ class LockboxClient:
         print(f"VOC Data: {voc_data}")
         print("=" * 25)
 
-async def main():
-    """Main function demonstrating usage"""
-    lockbox = LockboxClient()
-    
-    try:
-        # Scan for lockbox
-        device = await lockbox.scan_for_lockbox()
-        if not device:
-            print("No lockbox found!")
-            return
+    async def run(self):
+        """Main function demonstrating usage"""
+        lockbox = LockboxClient()
         
-        # Connect
-        if not await lockbox.connect():
-            print("Failed to connect!")
-            return
-        
-        # Identify as PC client by setting username
-        await lockbox.set_username("PC_CLIENT")
-        
-        # Wait a moment for the lockbox to process
-        await asyncio.sleep(1)
-        
-        # Read all status information
-        await lockbox.read_all_status()
-        
-        # Interactive loop
-        print("\n=== Interactive Mode ===")
-        print("Commands:")
-        print("  'username <name>' - Set username")
-        print("  'passcode <code>' - Enter passcode")
-        print("  'status' - Read all status")
-        print("  'quit' - Exit")
-        
-        while True:
-            try:
-                cmd = input("\nEnter command: ").strip().split()
-                if not cmd:
-                    continue
-                    
-                if cmd[0] == 'quit':
+        try:
+            # Scan for lockbox
+            device = await lockbox.scan_for_lockbox()
+            if not device:
+                print("No lockbox found!")
+                return
+            
+            # Connect
+            if not await lockbox.connect():
+                print("Failed to connect!")
+                return
+            
+            # Identify as PC client by setting username
+            await lockbox.set_username("PC_CLIENT")
+            
+            # Wait a moment for the lockbox to process
+            await asyncio.sleep(1)
+            
+            # Read all status information
+            await lockbox.read_all_status()
+            
+            # Interactive loop
+            print("\n=== Interactive Mode ===")
+            print("Commands:")
+            print("  'username <name>' - Set username")
+            print("  'passcode <code>' - Enter passcode")
+            print("  'status' - Read all status")
+            print("  'quit' - Exit")
+            
+            while True:
+                try:
+                    cmd = input("\nEnter command: ").strip().split()
+                    if not cmd:
+                        continue
+                        
+                    if cmd[0] == 'quit':
+                        break
+                    elif cmd[0] == 'username' and len(cmd) > 1:
+                        await lockbox.set_username(cmd[1])
+                        await asyncio.sleep(0.5)
+                        await lockbox.read_passcode()  # Read the generated passcode
+                    elif cmd[0] == 'passcode' and len(cmd) > 1:
+                        await lockbox.enter_passcode(cmd[1])
+                        await asyncio.sleep(0.5)
+                        await lockbox.read_lock_status()  # Check if lock opened
+                    elif cmd[0] == 'status':
+                        await lockbox.read_all_status()
+                    else:
+                        print("Invalid command")
+                        
+                except KeyboardInterrupt:
                     break
-                elif cmd[0] == 'username' and len(cmd) > 1:
-                    await lockbox.set_username(cmd[1])
-                    await asyncio.sleep(0.5)
-                    await lockbox.read_passcode()  # Read the generated passcode
-                elif cmd[0] == 'passcode' and len(cmd) > 1:
-                    await lockbox.enter_passcode(cmd[1])
-                    await asyncio.sleep(0.5)
-                    await lockbox.read_lock_status()  # Check if lock opened
-                elif cmd[0] == 'status':
-                    await lockbox.read_all_status()
-                else:
-                    print("Invalid command")
-                    
-            except KeyboardInterrupt:
-                break
-    
-    finally:
-        await lockbox.disconnect()
+        
+        finally:
+            await lockbox.disconnect()
 
-if __name__ == "__main__":
-    # Check if bleak is installed
+if __name__ == "__main__":    
+    lockbox_client = LockboxClient()
     try:
-        import bleak
-    except ImportError:
-        print("Please install bleak: pip install bleak")
-        sys.exit(1)
-    
-    asyncio.run(main())
+        asyncio.run(lockbox_client.run())
+    except Exception as e:
+        print(f"Error: {e}")
