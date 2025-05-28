@@ -22,6 +22,8 @@ VOC_SENSOR_CHAR_UUID = "0000ff06-0000-1000-8000-00805f9b34fb"
 
 class LockboxClient:
     def __init__(self):
+        self._target_device_name = "SecureLockbox"
+
         self._client = None
         self._device = None
         self._connected = False
@@ -44,27 +46,19 @@ class LockboxClient:
             "0000ff06-0000-1000-8000-00805f9b34fb": "VOC_SENSOR_CHAR_UUID",
         }
         
-    async def scan_for_lockbox(self, timeout=10.0):
-        """Scan for SecureLockbox device"""
-        logger.info("Scanning for SecureLockbox...")
-        
-        devices = await BleakScanner.discover(timeout=timeout)
-        
-        for device in devices:
-            if device.name and "SecureLockbox" in device.name:
-                logger.info(f"Found SecureLockbox: {device.name} ({device.address})")
-                self._device = device
-                return device
-                
-        logger.error("SecureLockbox not found")
-        return None
-    
-    async def connect(self):
-        """Connect to the lockbox"""
-        if not self._device:
-            logger.error("No device found. Run scan_for_lockbox() first")
-            return False
+    async def _device_scan(self):
+        while True:
+            logger.info("Scanning for SecureLockbox...")
+            devices = await BleakScanner.discover()
             
+            self._device = next((d for d in devices if d.name == self._target_device_name), None)
+            if self._device:
+                logger.info(f"Found SecureLockbox: {self._device.name} ({self._device.address})")
+                return
+            else: 
+                logger.error("SecureLockbox not found")
+
+    async def _device_connect(self):            
         try:
             logger.info(f"Connecting to {self._device.address}...")
             self._client = BleakClient(self._device.address)
@@ -278,31 +272,28 @@ class LockboxClient:
         print("=" * 25)
 
     async def user_loop(self):
-        """Main function demonstrating usage"""
-        lockbox = LockboxClient()
-        
+        """Main function demonstrating usage"""        
         try:
             # Scan for lockbox
-            device = await lockbox.scan_for_lockbox()
-            if not device:
+            await self._device_scan()
+            if not self._device:
                 print("No lockbox found!")
                 return
             
             # Connect
-            if not await lockbox.connect():
+            if not await self._device_connect():
                 print("Failed to connect!")
                 return
             
             # Identify as PC client by setting username
-            await lockbox.set_username("PC_CLIENT")
+            await self.set_username("PC_CLIENT")
             
             # Wait a moment for the lockbox to process
             await asyncio.sleep(1)
             
             # Read all status information
-            await lockbox.read_all_status()
+            await self.read_all_status()
             
-            # Interactive loop
             print("\n=== Interactive Mode ===")
             print("Commands:")
             print("  'username <name>' - Set username")
@@ -310,6 +301,8 @@ class LockboxClient:
             print("  'status' - Read all status")
             print("  'quit' - Exit")
             
+            # Interactive loop
+
             while True:
                 try:
                     cmd = input("\nEnter command: ").strip().split()
@@ -319,15 +312,15 @@ class LockboxClient:
                     if cmd[0] == 'quit':
                         break
                     elif cmd[0] == 'username' and len(cmd) > 1:
-                        await lockbox.set_username(cmd[1])
+                        await self.set_username(cmd[1])
                         await asyncio.sleep(0.5)
-                        await lockbox.read_passcode()  # Read the generated passcode
+                        await self.read_passcode()  # Read the generated passcode
                     elif cmd[0] == 'passcode' and len(cmd) > 1:
-                        await lockbox.enter_passcode(cmd[1])
+                        await self.enter_passcode(cmd[1])
                         await asyncio.sleep(0.5)
-                        await lockbox.read_lock_status()  # Check if lock opened
+                        await self.read_lock_status()  # Check if lock opened
                     elif cmd[0] == 'status':
-                        await lockbox.read_all_status()
+                        await self.read_all_status()
                     else:
                         print("Invalid command")
                         
@@ -335,7 +328,7 @@ class LockboxClient:
                     break
         
         finally:
-            await lockbox.disconnect()
+            await self.disconnect()
 
 
 # Creates each thread as a task to run them sumultaneously.
