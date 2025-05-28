@@ -33,6 +33,7 @@ static char* static_mac_str = "dc:80:00:00:08:35";
 #define BT_UUID_LOCK_STATUS          BT_UUID_DECLARE_16(0xCC03)
 #define BT_UUID_USER_STATUS          BT_UUID_DECLARE_16(0xDD04)
 #define BT_UUID_PASSCODE             BT_UUID_DECLARE_16(0xEE05)
+#define BT_UUID_VOC_SENSOR           BT_UUID_DECLARE_16(0xFF06)  // Sensor UUID
 
 typedef enum {
     TX_USER_ADDED = 1,
@@ -97,6 +98,10 @@ static struct k_msgq pending_tx_queue;
 static simple_transaction_t pending_tx_buffer[10];
 static struct bt_conn *current_conn = NULL;
 static char current_username[MAX_USER_ID_LEN] = "UNKNOWN";
+
+#define VOC_PRESENCE_THRESHOLD 500
+static uint16_t current_voc_value = 0;
+static uint32_t last_voc_timestamp = 0;
 
 static int create_genesis_block(void);
 static int save_blockchain(void);
@@ -369,6 +374,41 @@ static void send_alert_to_dashboard(const char *message) {
     LOG_ERR("DASHBOARD ALERT: %s", message);
 }
 
+// NEW: VOC sensor processing function
+static void process_voc_reading(uint16_t voc_ppb) {
+    current_voc_value = voc_ppb;
+    last_voc_timestamp = k_uptime_get_32();
+    
+    LOG_INF("VOC reading: %u PPB", voc_ppb);
+    
+    // Check if VOC level indicates human presence
+    if (voc_ppb > VOC_PRESENCE_THRESHOLD) {
+        k_mutex_lock(&lockbox_mutex, K_FOREVER);
+        
+        // Only trigger if system is ready and we have a user
+        if (g_lockbox_state.state == STATE_READY && strlen(g_lockbox_state.current_user) > 0) {
+            LOG_INF("VOC threshold exceeded (%u > %u) - triggering presence detection", 
+                    voc_ppb, VOC_PRESENCE_THRESHOLD);
+            
+            g_lockbox_state.state = STATE_PRESENCE_DETECTED;
+            k_mutex_unlock(&lockbox_mutex);
+            
+            char data[MAX_DATA_LEN];
+            snprintf(data, sizeof(data), "VOC presence: %u PPB", voc_ppb);
+            add_transaction(TX_PRESENCE_DETECTED, g_lockbox_state.current_user, data);
+            
+            k_mutex_lock(&lockbox_mutex, K_FOREVER);
+            g_lockbox_state.state = STATE_WAITING_PASSCODE;
+            k_mutex_unlock(&lockbox_mutex);
+            
+            LOG_INF("System ready for passcode entry (VOC triggered)");
+        } else {
+            k_mutex_unlock(&lockbox_mutex);
+            LOG_WRN("VOC presence detected but no active user or system not ready");
+        }
+    }
+}
+
 static int reset_blockchain(void) {
     k_mutex_lock(&blockchain_mutex, K_FOREVER);
     k_mutex_lock(&lockbox_mutex, K_FOREVER);
@@ -452,6 +492,13 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
     shell_print(sh, "System Locked: %s", g_lockbox_state.system_locked ? "YES" : "NO");
     shell_print(sh, "Tamper Detected: %s", g_lockbox_state.tamper_detected ? "YES" : "NO");
     shell_print(sh, "Lock Status: %s", lock_is_open() ? "OPEN" : "CLOSED");
+    
+    // NEW: VOC sensor status
+    shell_print(sh, "\n=== VOC Sensor Status ===");
+    shell_print(sh, "Current VOC: %u PPB", current_voc_value);
+    shell_print(sh, "Threshold: %u PPB", VOC_PRESENCE_THRESHOLD);
+    shell_print(sh, "Last Reading: %u ms ago", 
+                last_voc_timestamp > 0 ? k_uptime_get_32() - last_voc_timestamp : 0);
     
     shell_print(sh, "\n=== Blockchain Status ===");
     shell_print(sh, "Total Blocks: %u", g_blockchain.total_blocks);
@@ -694,6 +741,35 @@ static ssize_t read_passcode(struct bt_conn *conn, const struct bt_gatt_attr *at
     return bt_gatt_attr_read(conn, attr, buf, len, offset, passcode, strlen(passcode));
 }
 
+// NEW: VOC sensor characteristic handlers
+static ssize_t write_voc_sensor(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                               const void *buf, uint16_t len, uint16_t offset, uint8_t flags) {
+    if (len != 2) return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+    
+    // VOC data is sent as 16-bit value (little endian)
+    uint16_t voc_value = *(uint16_t*)buf;
+    
+    process_voc_reading(voc_value);
+    
+    LOG_INF("BLE: VOC data received: %u PPB", voc_value);
+    return len;
+}
+
+static ssize_t read_voc_sensor(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                              void *buf, uint16_t len, uint16_t offset) {
+    struct {
+        uint16_t current_voc;
+        uint16_t threshold;
+        uint32_t timestamp;
+    } voc_data;
+    
+    voc_data.current_voc = current_voc_value;
+    voc_data.threshold = VOC_PRESENCE_THRESHOLD;
+    voc_data.timestamp = last_voc_timestamp;
+    
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &voc_data, sizeof(voc_data));
+}
+
 BT_GATT_SERVICE_DEFINE(lockbox_svc,
     BT_GATT_PRIMARY_SERVICE(BT_UUID_LOCKBOX_SERVICE),
     
@@ -721,6 +797,12 @@ BT_GATT_SERVICE_DEFINE(lockbox_svc,
         BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
         BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
         read_passcode, write_passcode, NULL),
+        
+    // NEW: VOC sensor characteristic
+    BT_GATT_CHARACTERISTIC(BT_UUID_VOC_SENSOR,
+        BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+        BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+        read_voc_sensor, write_voc_sensor, NULL),
 );
 
 static const struct bt_data ad[] = {
