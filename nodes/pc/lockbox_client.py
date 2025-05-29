@@ -50,6 +50,7 @@ class LockboxClient:
 
         self.TAGO_DEVICE_TOKEN = "6e7a2bcf-34f1-4349-b741-590ffa35b8e8"
         self._tago_running = False
+        self._verbose_monitoring = False
 
     async def send_to_tago(self, data):
         """Send data to TagoIO"""
@@ -60,6 +61,7 @@ class LockboxClient:
             {"variable": "timestamp", "value": time.time()},
             {"variable": "lock_status", "value": data["lock_status"]},
             {"variable": "username", "value": data["username"]},
+            {"variable": "state", "value": data["state"]},
             {"variable": "system_locked", "value": data["system_locked"]},
             {"variable": "failed_attempts", "value": data["failed_attempts"]},
             {"variable": "tamper_detected", "value": data["tamper_detected"]},
@@ -69,7 +71,7 @@ class LockboxClient:
 
         try:
             response = requests.post(url, headers=headers, json=payload)
-            logger.info(f"\n\nTagoIO response: {response.status_code}/\n\n")
+            logger.info(f"\n\nTagoIO response: {response.status_code}\n\n")
             return True
         except Exception as e:
             logger.error(f"Failed to send to TagoIO: {e}")
@@ -94,15 +96,18 @@ class LockboxClient:
                 
                 # Prepare data for TagoIO
                 data = {
+                    "test": 69,
                     "time": time.time(),
                     "username": username,
                     "lock_status": lock_status,
+                    "state": user_status.get('state', 'UNKOWN'),
                     "system_locked": user_status.get('system_locked', False),
                     "failed_attempts": user_status.get('failed_attempts', 0),
                     "tamper_detected": user_status.get('tamper_detected', False),
                     "current_voc": voc_data.get('current_voc', 0),
                     "voc_threshold": voc_data.get('threshold', 0),
                 }
+                print(data)
                 
                 # Send to TagoIO
                 await self.send_to_tago(data)
