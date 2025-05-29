@@ -3,9 +3,6 @@
 cmake_minimum_required(VERSION 3.20.0)
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
-project(touchpad)
+project(m5stack_keypad)
 
-FILE(GLOB sources src/*.c)
-target_sources(app PRIVATE ${sources})
-
-target_include_directories(app PRIVATE include)
+target_sources(app PRIVATE src/main.c)
