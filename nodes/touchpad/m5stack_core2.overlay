@@ -1,20 +1,32 @@
-&i2c1 {
-    status = "okay";
-
-    gt911@5d {
-        compatible = "goodix,gt911";
-        reg = <0x5d>;
-        irq-gpios = <&gpio0 6 GPIO_ACTIVE_LOW>;
-        reset-gpios = <&gpio0 5 GPIO_ACTIVE_LOW>;
-        label = "GT911";
+/ {
+    kbdmatrix: kbdmatrix {
+        compatible = "gpio-kbd-matrix";
         status = "okay";
+        row-gpios = <&gpio0 19 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>,  
+                    <&gpio0 14 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>,
+                    <&gpio0 26 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
+        col-gpios = <&gpio0 33 GPIO_ACTIVE_LOW>,
+                    <&gpio0 27 GPIO_ACTIVE_LOW>,
+                    <&gpio0 32 GPIO_ACTIVE_LOW>;
+        settle-time-us = <0>;
+        no-ghostkey-check;
+
+        keymap {
+            compatible = "input-keymap";
+            status = "okay";
+            keymap = <
+                MATRIX_KEY(0, 0, INPUT_KEY_1)
+                MATRIX_KEY(0, 1, INPUT_KEY_2)
+                MATRIX_KEY(0, 2, INPUT_KEY_3)
+                MATRIX_KEY(1, 0, INPUT_KEY_4)
+                MATRIX_KEY(1, 1, INPUT_KEY_5)
+                MATRIX_KEY(1, 2, INPUT_KEY_6)
+                MATRIX_KEY(2, 0, INPUT_KEY_7)
+                MATRIX_KEY(2, 1, INPUT_KEY_8)
+                MATRIX_KEY(2, 2, INPUT_KEY_9)
+            >;
+            row-size = <3>;
+            col-size = <3>;
+        };
     };
-};
-
-&gpio0 {
-    status = "okay";
-};
-
-&spi2 {
-    status = "okay";
 };
