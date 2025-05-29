@@ -29,6 +29,10 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 #define COLOR_GREEN     0x07E0
 #define COLOR_RED       0xF800
 #define COLOR_BLUE      0x001F
+#define COLOR_TAN 0xF4A500
+#define COLOR_LILAC_PURPLE 0xD8A6F0
+
+
 
 /* Button positions */
 typedef struct {
@@ -124,6 +128,35 @@ static void draw_text(int x, int y, const char *text, uint16_t color)
 }
 
 
+// /* Button positions */
+// static void init_buttons(void)
+// {
+//     /* 2x2 grid for numbers 1-4 */
+//     for (int i = 0; i < 4; i++) {
+//         int row = i / 2;  // Determine row (0 or 1)
+//         int col = i % 2;  // Determine column (0 or 1)
+        
+//         // Shift numbers more to the left
+//         buttons[i].x = 20 + col * (BUTTON_WIDTH + BUTTON_GAP);  
+//         buttons[i].y = 80 + row * (BUTTON_HEIGHT + BUTTON_GAP); 
+//         buttons[i].w = BUTTON_WIDTH;
+//         buttons[i].h = BUTTON_HEIGHT;
+//         buttons[i].number = i + 1;
+//     }
+    
+//     /* Enter button */
+//     buttons[4].x = 90;
+//     buttons[4].y = 200;  // Back to original position
+//     buttons[4].w = BUTTON_WIDTH;
+//     buttons[4].h = BUTTON_HEIGHT;
+//     buttons[4].number = -1;  // No number associated with the Enter button
+// }
+
+
+
+
+
+
 /* Button positions */
 static void init_buttons(void)
 {
@@ -139,19 +172,60 @@ static void init_buttons(void)
         buttons[i].h = BUTTON_HEIGHT;
         buttons[i].number = i + 1;
     }
-    
-    /* Enter button */
+
     buttons[4].x = 90;
-    buttons[4].y = 200;  // Back to original position
+    buttons[4].y = 200; 
     buttons[4].w = BUTTON_WIDTH;
     buttons[4].h = BUTTON_HEIGHT;
-    buttons[4].number = -1;  // No number associated with the Enter button
+    buttons[4].number = -1;  // Use -1 for the CLEAR button (instead of 0 or any number)
 }
 
-/* Draw a button */
+
+
+
+
+
+
+
+
+
+// /* Draw a button */
+// static void draw_button(button_t *btn, bool pressed)
+// {
+//     uint16_t bg_color = pressed ? COLOR_GRAY : COLOR_DARK_GRAY;
+//     uint16_t border_color = COLOR_WHITE;
+    
+//     /* Draw button background */
+//     draw_rect(btn->x, btn->y, btn->w, btn->h, bg_color);
+    
+//     /* Draw border */
+//     draw_rect(btn->x, btn->y, btn->w, 1, border_color); /* top */
+//     draw_rect(btn->x, btn->y + btn->h - 1, btn->w, 1, border_color); /* bottom */
+//     draw_rect(btn->x, btn->y, 1, btn->h, border_color); /* left */
+//     draw_rect(btn->x + btn->w - 1, btn->y, 1, btn->h, border_color); /* right */
+    
+//     /* Draw button text */
+//     if (btn->number >= 1 && btn->number <= 4) {
+//         char text[2] = {'0' + btn->number, '\0'};
+//         draw_text(btn->x + btn->w / 2 - 3, btn->y + btn->h / 2 - 3, text, COLOR_WHITE);
+//     } else if (btn->number == 0) {
+//         draw_text(btn->x + 8, btn->y + btn->h / 2 - 3, "ENTER", COLOR_WHITE);
+//     }
+// }
+
 static void draw_button(button_t *btn, bool pressed)
 {
-    uint16_t bg_color = pressed ? COLOR_GRAY : COLOR_DARK_GRAY;
+    uint16_t bg_color = COLOR_DARK_GRAY;  // Default color for non-clear buttons
+    
+    // Check if the button is the "CLEAR" button (formerly Enter button)
+    if (btn->number == -1) {
+        bg_color = pressed ? COLOR_LILAC_PURPLE : COLOR_LILAC_PURPLE;  // Set to lilac purple
+    }
+    // Check if the button is one of the number buttons (1-4)
+    else if (btn->number >= 1 && btn->number <= 4) {
+        bg_color = pressed ? COLOR_TAN : COLOR_TAN;  // Set to tan
+    }
+    
     uint16_t border_color = COLOR_WHITE;
     
     /* Draw button background */
@@ -167,10 +241,14 @@ static void draw_button(button_t *btn, bool pressed)
     if (btn->number >= 1 && btn->number <= 4) {
         char text[2] = {'0' + btn->number, '\0'};
         draw_text(btn->x + btn->w / 2 - 3, btn->y + btn->h / 2 - 3, text, COLOR_WHITE);
-    } else if (btn->number == 0) {
-        draw_text(btn->x + 8, btn->y + btn->h / 2 - 3, "ENTER", COLOR_WHITE);
+    } else if (btn->number == -1) {
+        draw_text(btn->x + 8, btn->y + btn->h / 2 - 3, "CLEAR", COLOR_WHITE); // "CLEAR" for the button
     }
 }
+
+
+
+
 
 /* Update display with current passcode */
 static void update_display(void)
@@ -200,20 +278,60 @@ static void update_display(void)
 /* Check if point is inside button */
 static int point_in_button(int x, int y)
 {
-    for (int i = 0; i < 4; i++) { // Check for 4 buttons (1-4)
+    // Swap x and y for flipped coordinate system
+    int temp = x;
+    x = y;
+    y = temp;
+
+    for (int i = 0; i < 5; i++) {  // 4 number buttons + 1 enter button
         if (x >= buttons[i].x && x < buttons[i].x + buttons[i].w &&
             y >= buttons[i].y && y < buttons[i].y + buttons[i].h) {
             return i;
         }
     }
-    // Check for the Enter button (button index 4)
-    if (x >= buttons[4].x && x < buttons[4].x + buttons[4].w &&
-        y >= buttons[4].y && y < buttons[4].y + buttons[4].h) {
-        return 4; // Enter button
-    }
-
-    return -1;  // Return -1 if no button is pressed
+    return -1;
 }
+
+
+
+/* Handle button press */
+// static void handle_button_press(int btn_idx)
+// {
+//     if (btn_idx < 0 || btn_idx >= 5) return;
+    
+//     button_t *btn = &buttons[btn_idx];
+    
+//     /* Visual feedback */
+//     draw_button(btn, true);
+//     k_msleep(100);
+//     draw_button(btn, false);
+    
+//     if (btn->number >= 1 && btn->number <= 4) {
+//         /* Number button */
+//         if (passcode_pos < PASSCODE_LENGTH) {
+//             passcode[passcode_pos++] = '0' + btn->number;
+//             passcode[passcode_pos] = '\0';
+//             LOG_INF("Button %d pressed, passcode position: %d", btn->number, passcode_pos);
+            
+//             if (passcode_pos == PASSCODE_LENGTH) {
+//                 LOG_INF("Passcode complete: %s", passcode);
+//             }
+//         }
+//     } else if (btn->number == 0) {
+//         /* Enter button */
+//         if (passcode_pos == PASSCODE_LENGTH) {
+//             LOG_INF("Passcode entered: %s", passcode);
+//         }
+//     }
+    
+//     /* Update display */
+//     update_display();
+// }
+
+
+
+
+
 
 
 /* Handle button press */
@@ -239,11 +357,11 @@ static void handle_button_press(int btn_idx)
                 LOG_INF("Passcode complete: %s", passcode);
             }
         }
-    } else if (btn->number == 0) {
-        /* Enter button */
-        if (passcode_pos == PASSCODE_LENGTH) {
-            LOG_INF("Passcode entered: %s", passcode);
-        }
+    } else if (btn->number == -1) {
+        /* CLEAR button (was originally Enter) */
+        passcode_pos = 0;  // Clear the passcode
+        passcode[0] = '\0';  // Reset the passcode string
+        LOG_INF("Passcode cleared.");
     }
     
     /* Update display */
@@ -329,8 +447,9 @@ static void start_advertising_keypad(void)
         if (err == 0) {
             printk("Advertising updated with passcode: %s (%d digits)\n", 
                    passcode_pos > 0 ? passcode : "empty", passcode_pos);
-        }
 
+                   
+        }
         k_msleep(ADV_UPDATE_INTERVAL_MS);
     }
 }
@@ -393,11 +512,12 @@ int main(void)
     display_blanking_off(display);
     LOG_INF("Display ready");
     
+    set_keypad_mac();
+
     /* Initialize Bluetooth */
     bluetooth_init_keypad();
     LOG_INF("Bluetooth initialization started");
 
-    set_keypad_mac();
     
     /* Clear screen */
     draw_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
