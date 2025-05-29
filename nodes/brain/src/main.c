@@ -1681,7 +1681,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(lockbox_cmds,
     SHELL_SUBCMD_SET_END
 );
 
-SHELL_CMD_REGISTER(lockbox, &lockbox_cmds, "Lockbox blockchain commands", NULL);
+SHELL_CMD_REGISTER(lb, &lockbox_cmds, "Lockbox blockchain commands", NULL);
 
 static bool validate_block(simple_block_t *block) {
     uint32_t calculated_hash = calculate_block_hash(block);
