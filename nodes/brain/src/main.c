@@ -41,6 +41,8 @@ static char* static_mac_str =  "dc:80:00:00:08:35";
 #define BT_UUID_VOC_SENSOR           BT_UUID_DECLARE_16(0xFF06)
 #define BT_UUID_TAMPER_CONTROL       BT_UUID_DECLARE_16(0x1107)  // NEW: Tamper control
 
+static bool verbose = false;
+
 typedef enum {
     TX_USER_ADDED = 1,
     TX_ACCESS_GRANTED,
@@ -1661,6 +1663,10 @@ static int cmd_validate_blockchain(const struct shell *sh, size_t argc, char **a
     return ret;
 }
 
+static int cmd_verbose(const struct shell *sh, size_t argc, char **argv) {
+    verbose = !verbose;
+}
+
 // Updated shell commands with multi-user support
 SHELL_STATIC_SUBCMD_SET_CREATE(lockbox_cmds,
     SHELL_CMD(status, NULL, "Show lockbox and blockchain status", cmd_status),
@@ -1671,17 +1677,18 @@ SHELL_STATIC_SUBCMD_SET_CREATE(lockbox_cmds,
     SHELL_CMD(show_users, NULL, "Show active users with passcodes", cmd_show_users),
     SHELL_CMD(clear_users, NULL, "Clear all user passcodes", cmd_clear_users),
     SHELL_CMD(trigger_tamper, NULL, "Trigger tamper alert and system shutdown", cmd_trigger_tamper),
-    SHELL_CMD(open_lock, NULL, "Manually open lock", cmd_open_lock),
-    SHELL_CMD(close_lock, NULL, "Manually close lock", cmd_close_lock),
+    SHELL_CMD(open, NULL, "Manually open lock", cmd_open_lock),
+    SHELL_CMD(close, NULL, "Manually close lock", cmd_close_lock),
     SHELL_CMD(simulate_voc, NULL, "Simulate VOC reading <ppb>", cmd_simulate_voc),
     SHELL_CMD(blockchain_stats, NULL, "Show blockchain statistics", cmd_blockchain_stats),
     SHELL_CMD(history, NULL, "Show user transaction history", cmd_history),
     SHELL_CMD(validate, NULL, "Validate blockchain integrity", cmd_validate_blockchain),
     SHELL_CMD(reset, NULL, "Reset blockchain (WARNING: Destructive!)", cmd_reset),
+    SHELL_CMD(verbose, NULL, "Toggle verbosity", cmd_verbose),
     SHELL_SUBCMD_SET_END
 );
 
-SHELL_CMD_REGISTER(lockbox, &lockbox_cmds, "Lockbox blockchain commands", NULL);
+SHELL_CMD_REGISTER(lb, &lockbox_cmds, "Lockbox blockchain commands", NULL);
 
 static bool validate_block(simple_block_t *block) {
     uint32_t calculated_hash = calculate_block_hash(block);
@@ -1756,7 +1763,7 @@ static void device_found(
         if (ad->len >= 27) {
             uint16_t voc_value = (data[25] << 8) | data[26];
             process_voc_reading(voc_value);
-            LOG_INF("BLE: VOC data received: %d PPB", voc_value);
+            if (verbose) {LOG_INF("BLE: VOC data received: %d PPB", voc_value);}
         } else {
             LOG_WRN("BLE: VOC data too short (len = %u)", ad->len);
         }
@@ -1788,15 +1795,17 @@ static void device_found(
 
             process_tamper_reading(a, m);
 
-            LOG_INF("Magnetometer: X: %d.%02dµT Y: %d.%02dµT Z: %d.%02dµT", 
+            if (verbose) {
+                LOG_INF("Magnetometer: X: %d.%02dµT Y: %d.%02dµT Z: %d.%02dµT", 
                     m.x, m.xf,
                     m.y, m.yf,
                     m.z, m.zf);
 
-            LOG_INF("Accelerometer: X: %d.%02dg Y: %d.%02dg Z: %d.%02dg", 
+                LOG_INF("Accelerometer: X: %d.%02dg Y: %d.%02dg Z: %d.%02dg", 
                     a.x, a.xf,
                     a.y, a.yf,
                     a.z, a.zf);
+            }
         }
     }
 }
