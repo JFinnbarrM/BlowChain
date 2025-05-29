@@ -141,6 +141,11 @@ static const bt_addr_le_t mac_addr_disco = {
     .a = {.val = {0xFF, 0xCC, 0xBB, 0xCC, 0xBB, 0xDA}}
 };
 
+static const bt_addr_le_t mac_addr_core = {
+    .type = BT_ADDR_LE_RANDOM,
+    .a = {.val = {0xFF, 0xCC, 0xBC, 0xBB, 0xAA, 0xDA}}
+};
+
 struct sensor_data {
     int x;
     int y;
@@ -281,6 +286,28 @@ static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_NAME_COMPLETE, "SecureLockbox"),
     BT_DATA_BYTES(BT_DATA_UUID16_ALL, 0x34, 0x12),
 };
+
+static char* find_user_by_passcode(const char *passcode) {
+    static char found_user_id[MAX_USER_ID_LEN];
+    
+    k_mutex_lock(&user_table_mutex, K_FOREVER);
+    
+    // Clean up expired passcodes first
+    cleanup_expired_passcodes();
+    
+    for (int i = 0; i < MAX_USERS; i++) {
+        if (g_user_table.users[i].is_active && 
+            strcmp(g_user_table.users[i].passcode, passcode) == 0) {
+            strncpy(found_user_id, g_user_table.users[i].user_id, MAX_USER_ID_LEN - 1);
+            found_user_id[MAX_USER_ID_LEN - 1] = '\0';
+            k_mutex_unlock(&user_table_mutex);
+            return found_user_id;
+        }
+    }
+    
+    k_mutex_unlock(&user_table_mutex);
+    return NULL;
+}
 
 // Multi-user helper functions
 static int find_user_index(const char *user_id) {
@@ -744,7 +771,7 @@ static int create_new_block(simple_transaction_t *transactions, int tx_count) {
     return save_blockchain();
 }
 
-// Updated multi-user generate_passcode function
+// Updated multi-user generate_passcode function - LIMITED TO DIGITS 1,2,3,4 ONLY
 static void generate_passcode(const char *user_id) {
     if (system_shutdown_requested) {
         return;
@@ -769,10 +796,20 @@ static void generate_passcode(const char *user_id) {
         g_user_table.active_user_count++;
     }
     
-    // Generate passcode for this user
+    // Generate passcode for this user (digits 1-4 only)
     user_entry_t *user = &g_user_table.users[user_index];
     uint32_t seed = k_uptime_get_32() + (uint32_t)user_id[0] * 1000; // Add user variation
-    snprintf(user->passcode, sizeof(user->passcode), "%06u", (seed % 1000000));
+    
+    // Generate 6-digit passcode using only digits 1, 2, 3, 4
+    char passcode_digits[7]; // 6 digits + null terminator
+    for (int i = 0; i < 6; i++) {
+        seed = seed * 1103515245 + 12345; // Simple LCG for randomness
+        int digit = ((seed >> 16) % 4) + 1; // Get 1, 2, 3, or 4
+        passcode_digits[i] = '0' + digit;
+    }
+    passcode_digits[6] = '\0';
+    strcpy(user->passcode, passcode_digits);
+    
     strncpy(user->user_id, user_id, MAX_USER_ID_LEN - 1);
     user->user_id[MAX_USER_ID_LEN - 1] = '\0';
     user->timestamp = k_uptime_get_32();
@@ -1665,6 +1702,7 @@ static int cmd_validate_blockchain(const struct shell *sh, size_t argc, char **a
 
 static int cmd_verbose(const struct shell *sh, size_t argc, char **argv) {
     verbose = !verbose;
+    return 0;
 }
 
 // Updated shell commands with multi-user support
@@ -1808,6 +1846,112 @@ static void device_found(
             }
         }
     }
+
+    bool is_mac_keypad = (bt_addr_le_cmp(addr, &mac_addr_core) == 0);
+    if (is_mac_keypad) {
+        uint8_t *data = ad->data;
+        
+        size_t pos = 0;
+        while (pos < ad->len) {
+            uint8_t length = data[pos];
+            if (length == 0) break;
+            
+            uint8_t type = data[pos + 1];
+            
+            if (type == 0xFF && length >= 8 && 
+                data[pos + 2] == 0x4C && data[pos + 3] == 0x00) {
+
+                char passcode_str[7];
+                bool has_complete_passcode = true;
+
+                for (int i = 0; i < 6; i++) {
+                    char digit = data[pos + 4 + i];
+                    if (digit >= '1' && digit <= '4') {
+                        passcode_str[i] = digit;
+                    } else if (digit == '0') {
+                        has_complete_passcode = false;
+                        break;
+                    } else {
+                        has_complete_passcode = false;
+                        break;
+                    }
+                }
+                passcode_str[6] = '\0';
+                
+                if (has_complete_passcode && strlen(passcode_str) == 6) {
+                    if(verbose) {
+                        LOG_INF("=== KEYPAD PASSCODE RECEIVED ===");
+                        LOG_INF("Passcode: %s", passcode_str);
+                    }
+            
+                k_mutex_lock(&lockbox_mutex, K_FOREVER);
+                system_state_t current_state = g_lockbox_state.state;
+                k_mutex_unlock(&lockbox_mutex);
+                
+                if (current_state == STATE_WAITING_PASSCODE) {
+                    bool voc_threshold_met = false;
+                    uint32_t current_time = k_uptime_get_32();
+                    uint32_t voc_age = (last_voc_timestamp > 0) ? (current_time - last_voc_timestamp) : UINT32_MAX;
+                    
+                    if (current_voc_value > VOC_PRESENCE_THRESHOLD && voc_age < 30000) {
+                        voc_threshold_met = true;
+                        LOG_INF("VOC requirement met: %u PPB (threshold: %u), age: %u ms", 
+                                current_voc_value, VOC_PRESENCE_THRESHOLD, voc_age);
+                    } else {
+                        LOG_WRN("VOC requirement NOT met: VOC=%u PPB (threshold: %u), age: %u ms", 
+                                current_voc_value, VOC_PRESENCE_THRESHOLD, voc_age);
+                    }
+                    
+                    char *user_id = find_user_by_passcode(passcode_str);
+                    
+                    if (user_id != NULL) {
+                        
+                        bool success = verify_passcode(user_id, passcode_str);
+                        
+                        if (success) {
+                            LOG_INF("=== KEYPAD ACCESS GRANTED ===");
+                            LOG_INF("User: %s successfully authenticated via keypad", user_id);
+                            LOG_INF("Passcode %s has been consumed and cannot be reused", passcode_str);
+                            
+                            char *check_user = find_user_by_passcode(passcode_str);
+                        } else {
+                            LOG_WRN("Keypad passcode verification failed for user: %s", user_id);
+                        }
+                    } else {
+                        LOG_WRN("Keypad passcode not found in active users: %s", passcode_str);
+                        
+                        k_mutex_lock(&lockbox_mutex, K_FOREVER);
+                        g_lockbox_state.failed_attempts++;
+                        
+                        if (g_lockbox_state.failed_attempts >= MAX_FAILED_ATTEMPTS) {
+                            g_lockbox_state.state = STATE_LOCKED;
+                            g_lockbox_state.system_locked = true;
+                            k_mutex_unlock(&lockbox_mutex);
+                            
+                            add_transaction(TX_SYSTEM_LOCKED, "KEYPAD", "System locked - too many keypad failures");
+                            lock_close();
+                            notify_lock_status(false);
+                            notify_user_status();
+                            
+                            LOG_ERR("System locked due to failed keypad attempts");
+                        } else {
+                            k_mutex_unlock(&lockbox_mutex);
+                            notify_user_status();
+                        }
+                        
+                        add_transaction(TX_PASSCODE_FAILED, "KEYPAD", "Invalid keypad passcode");
+                        LOG_WRN("Failed keypad passcode attempt (%d/%d)", 
+                                g_lockbox_state.failed_attempts, MAX_FAILED_ATTEMPTS);
+                    }
+                } else {
+                    LOG_WRN("Keypad passcode received but system not ready (state: %d)", current_state);
+                    LOG_INF("System must be in WAITING_PASSCODE state for keypad authentication");
+                }
+            }
+            }
+            pos += length + 1;
+        }
+    }
 }
 
 void observer_start(void)
@@ -1824,9 +1968,7 @@ void observer_start(void)
     };
     bt_le_scan_start(&scan_param, device_found);
 }
-////////////////////////////// BLE OBSERVER SECTION /////////////////////
 
-// Main function - Updated with multi-user initialization
 int main(void) {
     int err;
 
@@ -1853,7 +1995,7 @@ int main(void) {
     k_mutex_init(&blockchain_mutex);
     k_mutex_init(&lockbox_mutex);
     k_mutex_init(&connections_mutex);
-    k_mutex_init(&user_table_mutex);  // NEW: Multi-user mutex
+    k_mutex_init(&user_table_mutex);
     k_msgq_init(&pending_tx_queue, (char *)pending_tx_buffer,
                 sizeof(simple_transaction_t), 10);
     
@@ -1861,7 +2003,7 @@ int main(void) {
     memset(&g_lockbox_state, 0, sizeof(lockbox_state_t));
     g_lockbox_state.state = STATE_READY;
     memset(connections, 0, sizeof(connections));
-    memset(&g_user_table, 0, sizeof(user_table_t));  // NEW: Initialize user table
+    memset(&g_user_table, 0, sizeof(user_table_t));
     system_shutdown_requested = false;
     
     // Load blockchain
@@ -1871,7 +2013,7 @@ int main(void) {
         return ret;
     }
     
-    // Validate blockchain integrity after loading
+    // Validate blockchain
     k_mutex_lock(&blockchain_mutex, K_FOREVER);
     ret = validate_blockchain();
     k_mutex_unlock(&blockchain_mutex);
@@ -1883,7 +2025,6 @@ int main(void) {
         LOG_INF("Blockchain validation passed - integrity verified");
     }
     
-    // Initialize lock
     lock_init();
     
     LOG_INF("Blockchain initialized with %u blocks", g_blockchain.total_blocks);
@@ -1906,7 +2047,7 @@ int main(void) {
     
     observer_start();
 
-    // Main loop - monitor system state and shutdown flag
+    // Main loop
     while (!system_shutdown_requested) {
         k_sleep(K_MSEC(5000));
         

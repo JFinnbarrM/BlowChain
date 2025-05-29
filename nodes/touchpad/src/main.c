@@ -43,7 +43,7 @@ static char passcode[PASSCODE_LENGTH + 1] = {0};
 static int passcode_pos = 0;
 static int bluetooth_ready = 0;
 
-static char* keypad_mac_str = "dc:dd:ee:dd:ee:35"; 
+static char* keypad_mac_str = "DA:AA:BB:BC:CC:FF";
 
 /* Draw a filled rectangle */
 static void draw_rect(int x, int y, int w, int h, uint16_t color)
@@ -419,11 +419,6 @@ int main(void)
     update_display();
     
     LOG_INF("Ready - Touch buttons to enter 6-digit passcode");
-    
-    /* Main loop */
-    while (1) {
-        k_msleep(50);
-    }
     
     return 0;
 }

@@ -94,7 +94,6 @@ void sender_thread_disco(void) {
 }
 
 void bluetooth_init_disco(void) {
-    k_sleep(K_MSEC(3000));
   bt_addr_le_t mobile_addr;
   printf("1: %d\n", bt_addr_le_from_str("DA:BB:CC:BB:CC:FF", "random", &mobile_addr));
   printf("2: %d\n", bt_id_create(&mobile_addr, NULL));
