@@ -1665,6 +1665,7 @@ static int cmd_validate_blockchain(const struct shell *sh, size_t argc, char **a
 
 static int cmd_verbose(const struct shell *sh, size_t argc, char **argv) {
     verbose = !verbose;
+    return 0;
 }
 
 // Updated shell commands with multi-user support
