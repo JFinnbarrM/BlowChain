@@ -35,6 +35,7 @@ static char* static_mac_str =  "dc:80:00:00:08:35";
 #define BT_UUID_USER_STATUS          BT_UUID_DECLARE_16(0xDD04)
 #define BT_UUID_PASSCODE             BT_UUID_DECLARE_16(0xEE05)
 #define BT_UUID_VOC_SENSOR           BT_UUID_DECLARE_16(0xFF06)
+#define BT_UUID_TAMPER_CONTROL       BT_UUID_DECLARE_16(0x1107)  // NEW: Tamper control
 
 typedef enum {
     TX_USER_ADDED = 1,
@@ -46,7 +47,8 @@ typedef enum {
     TX_PASSCODE_FAILED,
     TX_TAMPER_DETECTED,
     TX_SYSTEM_LOCKED,
-    TX_SYSTEM_STARTUP
+    TX_SYSTEM_STARTUP,
+    TX_SYSTEM_SHUTDOWN  // NEW: System shutdown transaction
 } transaction_type_t;
 
 typedef enum {
@@ -95,6 +97,7 @@ typedef struct {
     uint32_t passcode_timestamp;
     bool tamper_detected;
     bool system_locked;
+    bool system_shutdown;  // NEW: System shutdown flag
 } lockbox_state_t;
 
 typedef struct {
@@ -124,11 +127,26 @@ static struct k_mutex connections_mutex;
 static uint16_t current_voc_value = 0;
 static uint32_t last_voc_timestamp = 0;
 
+// Global shutdown flag for threads
+static volatile bool system_shutdown_requested = false;
+
 static int create_genesis_block(void);
 static int save_blockchain(void);
 static int load_blockchain(void);
 static void send_alert_to_dashboard(const char *message);
 static int reset_blockchain(void);
+static int validate_blockchain(void);
+static void trigger_system_shutdown(const char *reason);  // NEW: System shutdown function
+
+// Connection management function declarations
+static int find_free_connection_slot(void);
+static int find_connection_by_handle(struct bt_conn *conn);
+static void update_connection_activity(struct bt_conn *conn);
+static client_type_t get_connection_type(struct bt_conn *conn);
+static void set_connection_type(struct bt_conn *conn, client_type_t type, const char *identifier);
+
+// Blockchain function declarations
+static int add_transaction(transaction_type_t type, const char *user_id, const char *data);
 
 FS_LITTLEFS_DECLARE_DEFAULT_CONFIG(storage);
 static struct fs_mount_t blockchain_fs_mount = {
@@ -143,26 +161,27 @@ static ssize_t write_voc_sensor(struct bt_conn *conn, const struct bt_gatt_attr 
                                const void *buf, uint16_t len, uint16_t offset, uint8_t flags);
 static ssize_t read_voc_sensor(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                 void *buf, uint16_t len, uint16_t offset);
-static void voc_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value);
 static ssize_t write_username(struct bt_conn *conn, const struct bt_gatt_attr *attr, 
                              const void *buf, uint16_t len, uint16_t offset, uint8_t flags);
 static ssize_t read_username(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                             void *buf, uint16_t len, uint16_t offset);
 static ssize_t read_block_info(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                               void *buf, uint16_t len, uint16_t offset);
-static void block_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value);
 static ssize_t read_lock_status(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                void *buf, uint16_t len, uint16_t offset);
-static void lock_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value);
 static ssize_t read_user_status(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                void *buf, uint16_t len, uint16_t offset);
-static void status_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value);
 static ssize_t write_passcode(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                              const void *buf, uint16_t len, uint16_t offset, uint8_t flags);
 static ssize_t read_passcode(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                             void *buf, uint16_t len, uint16_t offset);
+// NEW: Tamper control handlers
+static ssize_t write_tamper_control(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                                   const void *buf, uint16_t len, uint16_t offset, uint8_t flags);
+static ssize_t read_tamper_control(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                                  void *buf, uint16_t len, uint16_t offset);
 
-// GATT Service Definition - MOVED TO TOP to fix compilation errors
+// GATT Service Definition - Updated with tamper control
 BT_GATT_SERVICE_DEFINE(lockbox_svc,
     BT_GATT_PRIMARY_SERVICE(BT_UUID_LOCKBOX_SERVICE),
     
@@ -191,11 +210,16 @@ BT_GATT_SERVICE_DEFINE(lockbox_svc,
         BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
         read_passcode, write_passcode, NULL),
         
-    // NEW: VOC sensor characteristic
     BT_GATT_CHARACTERISTIC(BT_UUID_VOC_SENSOR,
         BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
         BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
         read_voc_sensor, write_voc_sensor, NULL),
+        
+    // NEW: Tamper control characteristic
+    BT_GATT_CHARACTERISTIC(BT_UUID_TAMPER_CONTROL,
+        BT_GATT_CHRC_READ | BT_GATT_CHRC_WRITE,
+        BT_GATT_PERM_READ | BT_GATT_PERM_WRITE,
+        read_tamper_control, write_tamper_control, NULL),
 );
 
 static const struct bt_data ad[] = {
@@ -261,8 +285,147 @@ static void set_connection_type(struct bt_conn *conn, client_type_t type, const 
     k_mutex_unlock(&connections_mutex);
 }
 
-// Notification functions
+// Hash and blockchain functions (simplified for space)
+static uint32_t simple_hash(const void *data, size_t len) {
+    const uint8_t *bytes = (const uint8_t *)data;
+    uint32_t hash = 0x811c9dc5;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= bytes[i];
+        hash *= 0x01000193;
+    }
+    return hash;
+}
+
+static int add_transaction(transaction_type_t type, const char *user_id, const char *data) {
+    if (system_shutdown_requested && type != TX_SYSTEM_SHUTDOWN) {
+        return -ESHUTDOWN;
+    }
+    
+    simple_transaction_t tx;
+    tx.timestamp = k_uptime_get_32();
+    tx.type = type;
+    strncpy(tx.user_id, user_id, MAX_USER_ID_LEN - 1);
+    tx.user_id[MAX_USER_ID_LEN - 1] = '\0';
+    strncpy(tx.data, data, MAX_DATA_LEN - 1);
+    tx.data[MAX_DATA_LEN - 1] = '\0';
+    tx.hash = simple_hash(&tx, sizeof(simple_transaction_t) - sizeof(tx.hash));
+    
+    int ret = k_msgq_put(&pending_tx_queue, &tx, K_NO_WAIT);
+    if (ret < 0) {
+        LOG_ERR("Transaction queue full");
+        return ret;
+    }
+    LOG_INF("Transaction added: %s - %s", user_id, data);
+    return 0;
+}
+
+// NEW: System shutdown function
+static void trigger_system_shutdown(const char *reason) {
+    LOG_ERR("=== INITIATING SYSTEM SHUTDOWN ===");
+    LOG_ERR("Reason: %s", reason);
+    
+    k_mutex_lock(&lockbox_mutex, K_FOREVER);
+    g_lockbox_state.tamper_detected = true;
+    g_lockbox_state.system_locked = true;
+    g_lockbox_state.system_shutdown = true;
+    g_lockbox_state.state = STATE_SHUTDOWN;
+    k_mutex_unlock(&lockbox_mutex);
+    
+    // Signal shutdown to all threads
+    system_shutdown_requested = true;
+    
+    // Record shutdown transaction
+    add_transaction(TX_SYSTEM_SHUTDOWN, "SYSTEM", reason);
+    
+    // Close and lock the physical lock
+    lock_close();
+    
+    // Disconnect all BLE connections
+    k_mutex_lock(&connections_mutex, K_FOREVER);
+    for (int i = 0; i < MAX_BLE_CONNECTIONS; i++) {
+        if (connections[i].is_active) {
+            LOG_WRN("Disconnecting BLE client: %s", connections[i].identifier);
+            bt_conn_disconnect(connections[i].conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+            bt_conn_unref(connections[i].conn);
+            memset(&connections[i], 0, sizeof(connection_info_t));
+        }
+    }
+    k_mutex_unlock(&connections_mutex);
+    
+    // Stop BLE advertising
+    bt_le_adv_stop();
+    
+    // Send critical alert
+    send_alert_to_dashboard("CRITICAL: System shutdown initiated - All operations halted");
+    
+    LOG_ERR("=== SYSTEM SHUTDOWN COMPLETE ===");
+    LOG_ERR("All operations halted. System requires physical reset.");
+}
+
+// NEW: Tamper control GATT handlers
+static ssize_t write_tamper_control(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                                   const void *buf, uint16_t len, uint16_t offset, uint8_t flags) {
+    if (len != 1) {
+        return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
+    }
+    
+    // Check if system is already shutdown
+    k_mutex_lock(&lockbox_mutex, K_FOREVER);
+    bool already_shutdown = g_lockbox_state.system_shutdown;
+    k_mutex_unlock(&lockbox_mutex);
+    
+    if (already_shutdown) {
+        LOG_WRN("Tamper control write rejected - system already shutdown");
+        return BT_GATT_ERR(BT_ATT_ERR_WRITE_NOT_PERMITTED);
+    }
+    
+    if (get_connection_type(conn) == CLIENT_TYPE_UNKNOWN) {
+        set_connection_type(conn, CLIENT_TYPE_PC, "PC_CLIENT");
+    }
+    
+    uint8_t tamper_trigger = *(uint8_t*)buf;
+    update_connection_activity(conn);
+    
+    LOG_INF("=== TAMPER CONTROL WRITE ===");
+    LOG_INF("Value received: %u", tamper_trigger);
+    
+    if (tamper_trigger != 0) {
+        LOG_ERR("*** TAMPER TRIGGERED VIA BLE ***");
+        trigger_system_shutdown("BLE tamper control activated");
+    } else {
+        LOG_INF("Tamper control: No action (value = 0)");
+    }
+    
+    return len;
+}
+
+static ssize_t read_tamper_control(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+                                  void *buf, uint16_t len, uint16_t offset) {
+    struct {
+        uint8_t tamper_detected;
+        uint8_t system_locked;
+        uint8_t system_shutdown;
+        uint32_t timestamp;
+    } tamper_status;
+    
+    k_mutex_lock(&lockbox_mutex, K_FOREVER);
+    tamper_status.tamper_detected = g_lockbox_state.tamper_detected ? 1 : 0;
+    tamper_status.system_locked = g_lockbox_state.system_locked ? 1 : 0;
+    tamper_status.system_shutdown = g_lockbox_state.system_shutdown ? 1 : 0;
+    tamper_status.timestamp = k_uptime_get_32();
+    k_mutex_unlock(&lockbox_mutex);
+    
+    update_connection_activity(conn);
+    return bt_gatt_attr_read(conn, attr, buf, len, offset, &tamper_status, sizeof(tamper_status));
+}
+
+// Notification functions - Updated to check shutdown state
 static void notify_voc_data(uint16_t voc_value) {
+    // Don't send notifications if system is shutdown
+    if (system_shutdown_requested) {
+        return;
+    }
+    
     struct {
         uint16_t voc_ppb;
         uint16_t threshold;
@@ -288,6 +451,10 @@ static void notify_voc_data(uint16_t voc_value) {
 }
 
 static void notify_lock_status(bool is_open) {
+    if (system_shutdown_requested) {
+        return;
+    }
+    
     uint8_t status = is_open ? 1 : 0;
     
     k_mutex_lock(&connections_mutex, K_FOREVER);
@@ -305,6 +472,10 @@ static void notify_lock_status(bool is_open) {
 }
 
 static void notify_user_status(void) {
+    if (system_shutdown_requested) {
+        return;
+    }
+    
     struct {
         uint8_t state;
         uint8_t failed_attempts;
@@ -334,6 +505,10 @@ static void notify_user_status(void) {
 }
 
 static void notify_block_info(void) {
+    if (system_shutdown_requested) {
+        return;
+    }
+    
     struct {
         uint32_t total_blocks;
         uint32_t latest_hash;
@@ -361,17 +536,7 @@ static void notify_block_info(void) {
     k_mutex_unlock(&connections_mutex);
 }
 
-// Hash and blockchain functions (simplified for space)
-static uint32_t simple_hash(const void *data, size_t len) {
-    const uint8_t *bytes = (const uint8_t *)data;
-    uint32_t hash = 0x811c9dc5;
-    for (size_t i = 0; i < len; i++) {
-        hash ^= bytes[i];
-        hash *= 0x01000193;
-    }
-    return hash;
-}
-
+// More blockchain functions
 static uint32_t calculate_block_hash(simple_block_t *block) {
     size_t hash_len = sizeof(simple_block_t) - sizeof(block->block_hash);
     return simple_hash(block, hash_len);
@@ -384,12 +549,22 @@ static void mine_block(simple_block_t *block) {
     do {
         block->nonce++;
         block->block_hash = calculate_block_hash(block);
+        
+        // Check for shutdown during mining
+        if (system_shutdown_requested) {
+            LOG_WRN("Mining interrupted by system shutdown");
+            return;
+        }
     } while (block->block_hash > difficulty);
     LOG_INF("Block %u mined! Hash: 0x%08x", block->id, block->block_hash);
 }
 
 // Blockchain functions (simplified - keeping key functionality)
 static int save_blockchain(void) {
+    if (system_shutdown_requested) {
+        return -ESHUTDOWN;
+    }
+    
     struct fs_file_t file;
     int ret;
     memset(&file, 0, sizeof(file));
@@ -440,26 +615,11 @@ static int create_genesis_block(void) {
     return save_blockchain();
 }
 
-static int add_transaction(transaction_type_t type, const char *user_id, const char *data) {
-    simple_transaction_t tx;
-    tx.timestamp = k_uptime_get_32();
-    tx.type = type;
-    strncpy(tx.user_id, user_id, MAX_USER_ID_LEN - 1);
-    tx.user_id[MAX_USER_ID_LEN - 1] = '\0';
-    strncpy(tx.data, data, MAX_DATA_LEN - 1);
-    tx.data[MAX_DATA_LEN - 1] = '\0';
-    tx.hash = simple_hash(&tx, sizeof(simple_transaction_t) - sizeof(tx.hash));
-    
-    int ret = k_msgq_put(&pending_tx_queue, &tx, K_NO_WAIT);
-    if (ret < 0) {
-        LOG_ERR("Transaction queue full");
-        return ret;
-    }
-    LOG_INF("Transaction added: %s - %s", user_id, data);
-    return 0;
-}
-
 static int create_new_block(simple_transaction_t *transactions, int tx_count) {
+    if (system_shutdown_requested) {
+        return -ESHUTDOWN;
+    }
+    
     if (g_blockchain.total_blocks >= MAX_BLOCKS) {
         LOG_ERR("Blockchain full!");
         return -ENOSPC;
@@ -478,6 +638,12 @@ static int create_new_block(simple_transaction_t *transactions, int tx_count) {
     }
     
     mine_block(new_block);
+    
+    // Check if shutdown was requested during mining
+    if (system_shutdown_requested) {
+        return -ESHUTDOWN;
+    }
+    
     g_blockchain.total_blocks++;
     g_blockchain.latest_hash = new_block->block_hash;
     
@@ -490,6 +656,10 @@ static int create_new_block(simple_transaction_t *transactions, int tx_count) {
 }
 
 static void generate_passcode(const char *user_id) {
+    if (system_shutdown_requested) {
+        return;
+    }
+    
     k_mutex_lock(&lockbox_mutex, K_FOREVER);
     uint32_t seed = k_uptime_get_32();
     snprintf(g_lockbox_state.current_passcode, sizeof(g_lockbox_state.current_passcode), 
@@ -497,7 +667,6 @@ static void generate_passcode(const char *user_id) {
     strcpy(g_lockbox_state.current_user, user_id);
     strcpy(current_username, user_id);
     g_lockbox_state.passcode_timestamp = k_uptime_get_32();
-    // Don't change state here - let it stay in WAITING_PASSCODE
     g_lockbox_state.failed_attempts = 0;
     k_mutex_unlock(&lockbox_mutex);
     
@@ -505,25 +674,26 @@ static void generate_passcode(const char *user_id) {
     snprintf(data, sizeof(data), "Passcode: %s", g_lockbox_state.current_passcode);
     add_transaction(TX_PASSCODE_GENERATED, user_id, data);
     
-    // Notify PC clients of status change
     notify_user_status();
     
     LOG_INF("Passcode generated for %s: %s", user_id, g_lockbox_state.current_passcode);
 }
 
 static void process_voc_reading(uint16_t voc_ppb) {
+    if (system_shutdown_requested) {
+        return;
+    }
+    
     current_voc_value = voc_ppb;
     last_voc_timestamp = k_uptime_get_32();
     
     LOG_INF("VOC reading: %u PPB", voc_ppb);
     
-    // Notify PC clients immediately
     notify_voc_data(voc_ppb);
     
     if (voc_ppb > VOC_PRESENCE_THRESHOLD) {
         k_mutex_lock(&lockbox_mutex, K_FOREVER);
         
-        // Only trigger if system is ready (not locked or already processing)
         if (g_lockbox_state.state == STATE_READY) {
             LOG_INF("VOC threshold exceeded (%u > %u) - triggering presence detection", 
                     voc_ppb, VOC_PRESENCE_THRESHOLD);
@@ -531,7 +701,6 @@ static void process_voc_reading(uint16_t voc_ppb) {
             g_lockbox_state.state = STATE_PRESENCE_DETECTED;
             k_mutex_unlock(&lockbox_mutex);
             
-            // Record presence detection (user-independent)
             char data[MAX_DATA_LEN];
             snprintf(data, sizeof(data), "VOC presence: %u PPB", voc_ppb);
             const char* user_for_log = strlen(g_lockbox_state.current_user) > 0 ? 
@@ -542,7 +711,6 @@ static void process_voc_reading(uint16_t voc_ppb) {
             g_lockbox_state.state = STATE_WAITING_PASSCODE;
             k_mutex_unlock(&lockbox_mutex);
             
-            // Notify PC clients of state change
             notify_user_status();
             
             LOG_INF("System ready for passcode entry (VOC triggered - user independent)");
@@ -554,6 +722,10 @@ static void process_voc_reading(uint16_t voc_ppb) {
 }
 
 static bool verify_passcode(const char *user_id, const char *entered_code) {
+    if (system_shutdown_requested) {
+        return false;
+    }
+    
     k_mutex_lock(&lockbox_mutex, K_FOREVER);
     
     if (g_lockbox_state.state != STATE_WAITING_PASSCODE) {
@@ -597,6 +769,10 @@ static bool verify_passcode(const char *user_id, const char *entered_code) {
 }
 
 static int reset_blockchain(void) {
+    if (system_shutdown_requested) {
+        return -ESHUTDOWN;
+    }
+    
     k_mutex_lock(&blockchain_mutex, K_FOREVER);
     k_mutex_lock(&lockbox_mutex, K_FOREVER);
     
@@ -632,8 +808,14 @@ static int reset_blockchain(void) {
 static void send_alert_to_dashboard(const char *message) {
     LOG_ERR("DASHBOARD ALERT: %s", message);
 }
+
+// Updated GATT handlers to check shutdown state
 static ssize_t write_voc_sensor(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                const void *buf, uint16_t len, uint16_t offset, uint8_t flags) {
+    if (system_shutdown_requested) {
+        return BT_GATT_ERR(BT_ATT_ERR_WRITE_NOT_PERMITTED);
+    }
+    
     LOG_INF("=== VOC WRITE RECEIVED ===");
     LOG_INF("Length: %u (expected: 2)", len);
     LOG_INF("Offset: %u", offset);
@@ -644,12 +826,10 @@ static ssize_t write_voc_sensor(struct bt_conn *conn, const struct bt_gatt_attr 
         return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     }
     
-    // Identify connection as VOC sensor if unknown
     if (get_connection_type(conn) == CLIENT_TYPE_UNKNOWN) {
         LOG_INF("*** IDENTIFYING CONNECTION AS VOC SENSOR ***");
         set_connection_type(conn, CLIENT_TYPE_VOC_SENSOR, "VOC_SENSOR");
         
-        // Verify identification worked
         client_type_t verified_type = get_connection_type(conn);
         LOG_INF("Connection type after identification: %d", verified_type);
         
@@ -686,23 +866,12 @@ static ssize_t read_voc_sensor(struct bt_conn *conn, const struct bt_gatt_attr *
     return bt_gatt_attr_read(conn, attr, buf, len, offset, &voc_data, sizeof(voc_data));
 }
 
-static void voc_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value) {
-    bool notify_enabled = (value == BT_GATT_CCC_NOTIFY);
-    LOG_INF("VOC notifications %s", notify_enabled ? "enabled" : "disabled");
-    
-    // Update notification settings for the connection that changed this
-    // Note: In a full implementation, you'd track which connection this came from
-    k_mutex_lock(&connections_mutex, K_FOREVER);
-    for (int i = 0; i < MAX_BLE_CONNECTIONS; i++) {
-        if (connections[i].is_active && connections[i].type == CLIENT_TYPE_PC) {
-            connections[i].voc_notifications_enabled = notify_enabled;
-        }
-    }
-    k_mutex_unlock(&connections_mutex);
-}
-
 static ssize_t write_username(struct bt_conn *conn, const struct bt_gatt_attr *attr, 
                              const void *buf, uint16_t len, uint16_t offset, uint8_t flags) {
+    if (system_shutdown_requested) {
+        return BT_GATT_ERR(BT_ATT_ERR_WRITE_NOT_PERMITTED);
+    }
+    
     if (len >= MAX_USER_ID_LEN) return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     
     if (get_connection_type(conn) == CLIENT_TYPE_UNKNOWN) {
@@ -720,11 +889,9 @@ static ssize_t write_username(struct bt_conn *conn, const struct bt_gatt_attr *a
     k_mutex_unlock(&lockbox_mutex);
     
     if (current_state == STATE_WAITING_PASSCODE) {
-        // Presence already detected by VOC - generate passcode now
         generate_passcode(current_username);
         LOG_INF("BLE: Username set to: %s (passcode generated - presence detected)", current_username);
     } else {
-        // No presence detected yet - just store username
         k_mutex_lock(&lockbox_mutex, K_FOREVER);
         strcpy(g_lockbox_state.current_user, current_username);
         k_mutex_unlock(&lockbox_mutex);
@@ -762,37 +929,11 @@ static ssize_t read_block_info(struct bt_conn *conn, const struct bt_gatt_attr *
     return bt_gatt_attr_read(conn, attr, buf, len, offset, &block_info, sizeof(block_info));
 }
 
-static void block_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value) {
-    bool notify_enabled = (value == BT_GATT_CCC_NOTIFY);
-    LOG_INF("Block notifications %s", notify_enabled ? "enabled" : "disabled");
-    
-    k_mutex_lock(&connections_mutex, K_FOREVER);
-    for (int i = 0; i < MAX_BLE_CONNECTIONS; i++) {
-        if (connections[i].is_active && connections[i].type == CLIENT_TYPE_PC) {
-            connections[i].block_notifications_enabled = notify_enabled;
-        }
-    }
-    k_mutex_unlock(&connections_mutex);
-}
-
 static ssize_t read_lock_status(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                void *buf, uint16_t len, uint16_t offset) {
     uint8_t status = lock_is_open() ? 1 : 0;
     update_connection_activity(conn);
     return bt_gatt_attr_read(conn, attr, buf, len, offset, &status, sizeof(status));
-}
-
-static void lock_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value) {
-    bool notify_enabled = (value == BT_GATT_CCC_NOTIFY);
-    LOG_INF("Lock status notifications %s", notify_enabled ? "enabled" : "disabled");
-    
-    k_mutex_lock(&connections_mutex, K_FOREVER);
-    for (int i = 0; i < MAX_BLE_CONNECTIONS; i++) {
-        if (connections[i].is_active && connections[i].type == CLIENT_TYPE_PC) {
-            connections[i].lock_notifications_enabled = notify_enabled;
-        }
-    }
-    k_mutex_unlock(&connections_mutex);
 }
 
 static ssize_t read_user_status(struct bt_conn *conn, const struct bt_gatt_attr *attr,
@@ -815,21 +956,12 @@ static ssize_t read_user_status(struct bt_conn *conn, const struct bt_gatt_attr 
     return bt_gatt_attr_read(conn, attr, buf, len, offset, &user_status, sizeof(user_status));
 }
 
-static void status_ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value) {
-    bool notify_enabled = (value == BT_GATT_CCC_NOTIFY);
-    LOG_INF("Status notifications %s", notify_enabled ? "enabled" : "disabled");
-    
-    k_mutex_lock(&connections_mutex, K_FOREVER);
-    for (int i = 0; i < MAX_BLE_CONNECTIONS; i++) {
-        if (connections[i].is_active && connections[i].type == CLIENT_TYPE_PC) {
-            connections[i].status_notifications_enabled = notify_enabled;
-        }
-    }
-    k_mutex_unlock(&connections_mutex);
-}
-
 static ssize_t write_passcode(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                              const void *buf, uint16_t len, uint16_t offset, uint8_t flags) {
+    if (system_shutdown_requested) {
+        return BT_GATT_ERR(BT_ATT_ERR_WRITE_NOT_PERMITTED);
+    }
+    
     if (len != 6) return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
     
     char passcode_str[7];
@@ -853,17 +985,17 @@ static ssize_t read_passcode(struct bt_conn *conn, const struct bt_gatt_attr *at
     return bt_gatt_attr_read(conn, attr, buf, len, offset, passcode, strlen(passcode));
 }
 
-// Background processing
+// Background processing - Updated to respect shutdown
 static void blockchain_processor(void) {
     simple_transaction_t pending_txs[MAX_TRANSACTIONS_PER_BLOCK];
     int tx_count = 0;
     
     LOG_INF("Blockchain processor started");
     
-    while (1) {
+    while (!system_shutdown_requested) {
         simple_transaction_t tx;
         
-        if (k_msgq_get(&pending_tx_queue, &tx, K_MSEC(10000)) == 0) {
+        if (k_msgq_get(&pending_tx_queue, &tx, K_MSEC(1000)) == 0) {
             k_mutex_lock(&blockchain_mutex, K_FOREVER);
             pending_txs[tx_count++] = tx;
             k_mutex_unlock(&blockchain_mutex);
@@ -883,6 +1015,15 @@ static void blockchain_processor(void) {
         
         k_sleep(K_MSEC(100));
     }
+    
+    // Process any remaining transactions during shutdown
+    if (tx_count > 0) {
+        k_mutex_lock(&blockchain_mutex, K_FOREVER);
+        create_new_block(pending_txs, tx_count);
+        k_mutex_unlock(&blockchain_mutex);
+    }
+    
+    LOG_INF("Blockchain processor stopped due to system shutdown");
 }
 
 K_THREAD_DEFINE(blockchain_thread, 2048, blockchain_processor, 
@@ -891,6 +1032,13 @@ K_THREAD_DEFINE(blockchain_thread, 2048, blockchain_processor,
 static void connected(struct bt_conn *conn, uint8_t err) {
     if (err) {
         LOG_ERR("BLE Connection failed (err 0x%02x)", err);
+        return;
+    }
+    
+    // Reject new connections if system is shutdown
+    if (system_shutdown_requested) {
+        LOG_WRN("Rejecting BLE connection - system shutdown");
+        bt_conn_disconnect(conn, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
         return;
     }
     
@@ -932,7 +1080,7 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
     .disconnected = disconnected,
 };
 
-// Shell commands (enhanced with notifications)
+// Shell commands - Updated with new tamper functionality
 static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
     k_mutex_lock(&lockbox_mutex, K_FOREVER);
     k_mutex_lock(&blockchain_mutex, K_FOREVER);
@@ -949,6 +1097,7 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
     shell_print(sh, "Failed Attempts: %u/3", g_lockbox_state.failed_attempts);
     shell_print(sh, "System Locked: %s", g_lockbox_state.system_locked ? "YES" : "NO");
     shell_print(sh, "Tamper Detected: %s", g_lockbox_state.tamper_detected ? "YES" : "NO");
+    shell_print(sh, "System Shutdown: %s", g_lockbox_state.system_shutdown ? "YES" : "NO");  // NEW
     shell_print(sh, "Lock Status: %s", lock_is_open() ? "OPEN" : "CLOSED");
     
     shell_print(sh, "\n=== VOC Sensor Status ===");
@@ -976,6 +1125,7 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
     shell_print(sh, "\n=== Blockchain Status ===");
     shell_print(sh, "Total Blocks: %u", g_blockchain.total_blocks);
     shell_print(sh, "Latest Hash: 0x%08x", g_blockchain.latest_hash);
+    shell_print(sh, "Shutdown Requested: %s", system_shutdown_requested ? "YES" : "NO");  // NEW
     
     k_mutex_unlock(&connections_mutex);
     k_mutex_unlock(&blockchain_mutex);
@@ -984,13 +1134,33 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
     return 0;
 }
 
+// Updated cmd_trigger_tamper to use new shutdown function
+static int cmd_trigger_tamper(const struct shell *sh, size_t argc, char **argv) {
+    if (system_shutdown_requested) {
+        shell_error(sh, "System already shutdown");
+        return -ESHUTDOWN;
+    }
+    
+    trigger_system_shutdown("Manual tamper alert via shell command");
+    
+    shell_print(sh, "=== SYSTEM SHUTDOWN INITIATED ===");
+    shell_print(sh, "Tamper alert triggered - all operations halted");
+    shell_print(sh, "Physical reset required to restore system");
+    
+    return 0;
+}
+
 static int cmd_generate_passcode(const struct shell *sh, size_t argc, char **argv) {
+    if (system_shutdown_requested) {
+        shell_error(sh, "System shutdown - operation not permitted");
+        return -ESHUTDOWN;
+    }
+    
     if (argc != 2) {
         shell_error(sh, "Usage: generate_passcode <user_id>");
         return -EINVAL;
     }
     
-    // Set the username and generate passcode (simulates presence detection)
     strcpy(current_username, argv[1]);
     
     k_mutex_lock(&lockbox_mutex, K_FOREVER);
@@ -998,7 +1168,7 @@ static int cmd_generate_passcode(const struct shell *sh, size_t argc, char **arg
     g_lockbox_state.state = STATE_WAITING_PASSCODE;
     k_mutex_unlock(&lockbox_mutex);
     
-    generate_passcode(argv[1]);  // This calls notify_user_status()
+    generate_passcode(argv[1]);
     shell_print(sh, "Passcode generated for user: %s", argv[1]);
     shell_print(sh, "System state set to WAITING_PASSCODE");
     shell_print(sh, "BLE clients notified of status change");
@@ -1006,6 +1176,11 @@ static int cmd_generate_passcode(const struct shell *sh, size_t argc, char **arg
 }
 
 static int cmd_detect_presence(const struct shell *sh, size_t argc, char **argv) {
+    if (system_shutdown_requested) {
+        shell_error(sh, "System shutdown - operation not permitted");
+        return -ESHUTDOWN;
+    }
+    
     k_mutex_lock(&lockbox_mutex, K_FOREVER);
     
     if (g_lockbox_state.state == STATE_READY) {
@@ -1022,7 +1197,6 @@ static int cmd_detect_presence(const struct shell *sh, size_t argc, char **argv)
         g_lockbox_state.state = STATE_WAITING_PASSCODE;
         k_mutex_unlock(&lockbox_mutex);
         
-        // Notify BLE clients
         notify_user_status();
         
         shell_print(sh, "Presence detected (user-independent)");
@@ -1038,45 +1212,30 @@ static int cmd_detect_presence(const struct shell *sh, size_t argc, char **argv)
 }
 
 static int cmd_enter_passcode(const struct shell *sh, size_t argc, char **argv) {
+    if (system_shutdown_requested) {
+        shell_error(sh, "System shutdown - operation not permitted");
+        return -ESHUTDOWN;
+    }
+    
     if (argc != 3) {
         shell_error(sh, "Usage: enter_passcode <user_id> <passcode>");
         return -EINVAL;
     }
     
-    bool success = verify_passcode(argv[1], argv[2]);  // This calls notify_lock_status() and notify_user_status()
+    bool success = verify_passcode(argv[1], argv[2]);
     shell_print(sh, "Passcode verification: %s", success ? "SUCCESS" : "FAILED");
     shell_print(sh, "BLE clients notified of status change");
     
     return 0;
 }
 
-static int cmd_trigger_tamper(const struct shell *sh, size_t argc, char **argv) {
-    k_mutex_lock(&lockbox_mutex, K_FOREVER);
-    g_lockbox_state.tamper_detected = true;
-    g_lockbox_state.system_locked = true;
-    g_lockbox_state.state = STATE_LOCKED;
-    k_mutex_unlock(&lockbox_mutex);
-    
-    add_transaction(TX_TAMPER_DETECTED, "SYSTEM", "Manual tamper alert");
-    send_alert_to_dashboard("CRITICAL: Manual tamper detected - Emergency lockdown");
-    
-    lock_close();
-    
-    // Notify BLE clients of all changes
-    notify_user_status();
-    notify_lock_status(false);
-    
-    shell_print(sh, "Tamper alert triggered - system locked");
-    shell_print(sh, "BLE clients notified of lock and status changes");
-    LOG_ERR("MANUAL TAMPER DETECTED - EMERGENCY LOCKDOWN");
-    
-    return 0;
-}
-
 static int cmd_open_lock(const struct shell *sh, size_t argc, char **argv) {
-    lock_open();
+    if (system_shutdown_requested) {
+        shell_error(sh, "System shutdown - operation not permitted");
+        return -ESHUTDOWN;
+    }
     
-    // Notify BLE clients
+    lock_open();
     notify_lock_status(true);
     
     shell_print(sh, "Lock manually opened");
@@ -1088,9 +1247,12 @@ static int cmd_open_lock(const struct shell *sh, size_t argc, char **argv) {
 }
 
 static int cmd_close_lock(const struct shell *sh, size_t argc, char **argv) {
-    lock_close();
+    if (system_shutdown_requested) {
+        shell_error(sh, "System shutdown - operation not permitted");
+        return -ESHUTDOWN;
+    }
     
-    // Notify BLE clients
+    lock_close();
     notify_lock_status(false);
     
     shell_print(sh, "Lock manually closed");
@@ -1102,6 +1264,11 @@ static int cmd_close_lock(const struct shell *sh, size_t argc, char **argv) {
 }
 
 static int cmd_simulate_voc(const struct shell *sh, size_t argc, char **argv) {
+    if (system_shutdown_requested) {
+        shell_error(sh, "System shutdown - operation not permitted");
+        return -ESHUTDOWN;
+    }
+    
     if (argc != 2) {
         shell_error(sh, "Usage: simulate_voc <voc_value_ppb>");
         return -EINVAL;
@@ -1114,7 +1281,7 @@ static int cmd_simulate_voc(const struct shell *sh, size_t argc, char **argv) {
         return -EINVAL;
     }
     
-    process_voc_reading(voc_value);  // This calls notify_voc_data() and potentially notify_user_status()
+    process_voc_reading(voc_value);
     
     shell_print(sh, "Simulated VOC reading: %u PPB", voc_value);
     shell_print(sh, "BLE clients notified of VOC data");
@@ -1135,7 +1302,7 @@ static int cmd_blockchain_stats(const struct shell *sh, size_t argc, char **argv
     shell_print(sh, "Latest Hash: 0x%08x", g_blockchain.latest_hash);
     
     int user_adds = 0, access_granted = 0, access_denied = 0, presence = 0;
-    int passcode_gen = 0, passcode_ok = 0, passcode_fail = 0, tamper = 0, locked = 0;
+    int passcode_gen = 0, passcode_ok = 0, passcode_fail = 0, tamper = 0, locked = 0, shutdown = 0;
     
     for (uint32_t i = 0; i < g_blockchain.total_blocks; i++) {
         simple_block_t *block = &g_blockchain.blocks[i];
@@ -1150,6 +1317,7 @@ static int cmd_blockchain_stats(const struct shell *sh, size_t argc, char **argv
                 case TX_PASSCODE_FAILED: passcode_fail++; break;
                 case TX_TAMPER_DETECTED: tamper++; break;
                 case TX_SYSTEM_LOCKED: locked++; break;
+                case TX_SYSTEM_SHUTDOWN: shutdown++; break;  // NEW
                 default: break;
             }
         }
@@ -1161,18 +1329,23 @@ static int cmd_blockchain_stats(const struct shell *sh, size_t argc, char **argv
     shell_print(sh, "Presence Events: %d", presence);
     shell_print(sh, "Tamper Events: %d", tamper);
     shell_print(sh, "System Lockouts: %d", locked);
+    shell_print(sh, "System Shutdowns: %d", shutdown);  // NEW
     
     k_mutex_unlock(&blockchain_mutex);
     return 0;
 }
 
 static int cmd_reset(const struct shell *sh, size_t argc, char **argv) {
+    if (system_shutdown_requested) {
+        shell_error(sh, "System shutdown - reset not permitted");
+        return -ESHUTDOWN;
+    }
+    
     shell_print(sh, "WARNING: This will permanently delete the blockchain!");
     
     if (argc > 1 && strcmp(argv[1], "YES") == 0) {
         int ret = reset_blockchain();
         if (ret == 0) {
-            // Notify BLE clients of blockchain reset
             notify_block_info();
             notify_user_status();
             
@@ -1247,18 +1420,37 @@ static int cmd_connections(const struct shell *sh, size_t argc, char **argv) {
     return 0;
 }
 
+static int cmd_validate_blockchain(const struct shell *sh, size_t argc, char **argv) {
+    shell_print(sh, "Validating blockchain integrity...");
+    
+    k_mutex_lock(&blockchain_mutex, K_FOREVER);
+    int ret = validate_blockchain();
+    k_mutex_unlock(&blockchain_mutex);
+    
+    if (ret == 0) {
+        shell_print(sh, "Blockchain validation: PASSED");
+        shell_print(sh, "All blocks and transactions verified successfully");
+    } else {
+        shell_error(sh, "Blockchain validation: FAILED (error %d)", ret);
+        shell_error(sh, "Blockchain integrity compromised!");
+    }
+    
+    return ret;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(lockbox_cmds,
     SHELL_CMD(status, NULL, "Show lockbox and blockchain status", cmd_status),
     SHELL_CMD(connections, NULL, "Show BLE connection details", cmd_connections),
     SHELL_CMD(generate_passcode, NULL, "Generate passcode for user", cmd_generate_passcode),
     SHELL_CMD(detect_presence, NULL, "Simulate presence detection (user-independent)", cmd_detect_presence),
     SHELL_CMD(enter_passcode, NULL, "Enter passcode for verification", cmd_enter_passcode),
-    SHELL_CMD(trigger_tamper, NULL, "Trigger tamper alert", cmd_trigger_tamper),
+    SHELL_CMD(trigger_tamper, NULL, "Trigger tamper alert and system shutdown", cmd_trigger_tamper),
     SHELL_CMD(open_lock, NULL, "Manually open lock", cmd_open_lock),
     SHELL_CMD(close_lock, NULL, "Manually close lock", cmd_close_lock),
     SHELL_CMD(simulate_voc, NULL, "Simulate VOC reading <ppb>", cmd_simulate_voc),
     SHELL_CMD(blockchain_stats, NULL, "Show blockchain statistics", cmd_blockchain_stats),
     SHELL_CMD(history, NULL, "Show user transaction history", cmd_history),
+    SHELL_CMD(validate, NULL, "Validate blockchain integrity", cmd_validate_blockchain),
     SHELL_CMD(reset, NULL, "Reset blockchain (WARNING: Destructive!)", cmd_reset),
     SHELL_SUBCMD_SET_END
 );
@@ -1289,8 +1481,6 @@ static bool validate_block(simple_block_t *block) {
     return true;
 }
 
-
-// Unused ?
 static int validate_blockchain(void) {
     LOG_INF("Validating blockchain...");
         
@@ -1315,50 +1505,100 @@ static int validate_blockchain(void) {
     return 0;
 }
 
-////////////////////////////// THIS NEEDS ITS OWN THREAD /////////////////////
-// set up for observing thingy
+////////////////////////////// BLE OBSERVER SECTION /////////////////////
 static const bt_addr_le_t mac_addr_thing = {
     .type = BT_ADDR_LE_RANDOM,
-    .a = {.val = {0xFF, 0xAA, 0xFF, 0xAA, 0xFF, 0xDA}}  // Reversed from string
+    .a = {.val = {0xFF, 0xAA, 0xFF, 0xAA, 0xFF, 0xDA}}
 };
 
-// found thingy
-static void device_observed(
+static const bt_addr_le_t mac_addr_disco = {
+    .type = BT_ADDR_LE_RANDOM,
+    .a = {.val = {0xFF, 0xCC, 0xBB, 0xCC, 0xBB, 0xDA}}
+};
+
+struct sensor_data {
+    int x;
+    int y;
+    int z;
+    int xf;
+    int yf;
+    int zf;
+};
+
+static void device_found(
     const bt_addr_le_t *addr, 
     int8_t rssi, 
     uint8_t type, 
     struct net_buf_simple *ad
 ) {
+    // Skip processing if system is shutdown
+    if (system_shutdown_requested) {
+        return;
+    }
     
-    bool device_is_thingy = (bt_addr_le_cmp(addr, &mac_addr_thing) == 0);
-    if (device_is_thingy) { 
-        // VOC data is sent as 16-bit value (little endian)
+    bool is_mac_thing = (bt_addr_le_cmp(addr, &mac_addr_thing) == 0);
 
+    if (is_mac_thing) { 
         uint8_t *data = ad->data;
-
         uint16_t voc_value = (data[25] << 8) | data[26];
         
         process_voc_reading(voc_value);
         
         LOG_INF("BLE: VOC data received: %d PPB", voc_value);
+    }
 
-        // return voc_value; NEED TO STORE SOMEWHERE
+    bool is_mac_disco = (bt_addr_le_cmp(addr, &mac_addr_disco) == 0);
+
+    if (is_mac_disco) {
+        uint8_t *data = ad->data;
+
+        struct sensor_data m = {
+            .x  = data[18],
+            .xf = data[19],
+            .y  = data[20],
+            .yf = data[21],
+            .z  = data[22],
+            .zf = data[23]
+        };
+
+        struct sensor_data a = {
+            .x  = data[24],
+            .xf = data[25],
+            .y  = data[26],
+            .yf = data[27],
+            .z  = data[28],
+            .zf = data[29]
+        };
+
+        LOG_INF("Magnetometer: X: %d.%02dµT Y: %d.%02dµT Z: %d.%02dµT", 
+                m.x, m.xf,
+                m.y, m.yf,
+                m.z, m.zf);
+
+        LOG_INF("Accelerometer: X: %d.%02dg Y: %d.%02dg Z: %d.%02dg", 
+                a.x, a.xf,
+                a.y, a.yf,
+                a.z, a.zf);
     }
 }
 
 void observer_start(void)
 {
-  struct bt_le_scan_param scan_param = {
-  .type       = BT_LE_SCAN_TYPE_PASSIVE,
-  .options    = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
-  .interval   = BT_GAP_SCAN_FAST_INTERVAL,
-  .window     = BT_GAP_SCAN_FAST_WINDOW,
-  };
-  bt_le_scan_start(&scan_param, device_observed);
+    if (system_shutdown_requested) {
+        return;
+    }
+    
+    struct bt_le_scan_param scan_param = {
+        .type       = BT_LE_SCAN_TYPE_PASSIVE,
+        .options    = BT_LE_SCAN_OPT_FILTER_DUPLICATE,
+        .interval   = BT_GAP_SCAN_FAST_INTERVAL,
+        .window     = BT_GAP_SCAN_FAST_WINDOW,
+    };
+    bt_le_scan_start(&scan_param, device_found);
 }
-////////////////////////////// THIS NEEDS ITS OWN THREAD /////////////////////
+////////////////////////////// BLE OBSERVER SECTION /////////////////////
 
-// Main function
+// Main function - Updated with shutdown monitoring
 int main(void) {
     int err;
 
@@ -1370,10 +1610,7 @@ int main(void) {
         LOG_ERR("Failed to set static address");
         return -1;
     }
-
-    LOG_INF("Continuous BLE Lockbox System Starting...");
     
-    // Initialize filesystem
     struct fs_statvfs stats;
     int ret = fs_statvfs("/lfs", &stats);
     if (ret != 0) {
@@ -1395,12 +1632,25 @@ int main(void) {
     memset(&g_lockbox_state, 0, sizeof(lockbox_state_t));
     g_lockbox_state.state = STATE_READY;
     memset(connections, 0, sizeof(connections));
+    system_shutdown_requested = false;  // Initialize shutdown flag
     
     // Load blockchain
     ret = load_blockchain();
     if (ret < 0) {
         LOG_ERR("Failed to initialize blockchain: %d", ret);
         return ret;
+    }
+    
+    // Validate blockchain integrity after loading
+    k_mutex_lock(&blockchain_mutex, K_FOREVER);
+    ret = validate_blockchain();
+    k_mutex_unlock(&blockchain_mutex);
+    
+    if (ret < 0) {
+        LOG_ERR("Blockchain validation failed - integrity compromised!");
+        LOG_WRN("Consider resetting blockchain or investigating corruption");
+    } else {
+        LOG_INF("Blockchain validation passed - integrity verified");
     }
     
     // Initialize lock
@@ -1414,13 +1664,6 @@ int main(void) {
         LOG_ERR("Bluetooth init failed (err %d)", err);
         return -1;
     }
-    
-    LOG_INF("BLE Multi-Connection Lockbox ready");
-    LOG_INF("- VOC sensor will send data every 2 seconds");
-    LOG_INF("- VOC > %u PPB triggers user-independent presence detection", VOC_PRESENCE_THRESHOLD);
-    LOG_INF("- PC will receive continuous notifications");
-    LOG_INF("- Flow: VOC trigger -> Username -> Passcode -> Unlock");
-    LOG_INF("- Supports up to %d simultaneous connections", MAX_BLE_CONNECTIONS);
 
     err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), NULL, 0);
     if (err) {
@@ -1430,13 +1673,25 @@ int main(void) {
 
     LOG_INF("Advertising started - ready for connections");
     
-    // k_msleep(5000);
     observer_start();
 
-    while (1) {
+    // Main loop - monitor system state and shutdown flag
+    while (!system_shutdown_requested) {
         k_sleep(K_MSEC(5000));
-        LOG_INF("System running - VOC: %u PPB, Blocks: %u", 
-                current_voc_value, g_blockchain.total_blocks);
+        
+        if (!system_shutdown_requested) {
+            LOG_INF("System running - VOC: %u PPB, Blocks: %u", 
+                    current_voc_value, g_blockchain.total_blocks);
+        }
+    }
+    
+    // TRIGGER SHUTDOWN
+    LOG_ERR("=== TAMPER DETECTED - MELT DOWN ===");
+
+    save_blockchain();
+    
+    while (1) {
+        k_sleep(K_FOREVER);
     }
     
     return 0;
