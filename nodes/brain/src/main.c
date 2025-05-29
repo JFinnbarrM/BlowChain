@@ -744,7 +744,7 @@ static int create_new_block(simple_transaction_t *transactions, int tx_count) {
     return save_blockchain();
 }
 
-// Updated multi-user generate_passcode function
+// Updated multi-user generate_passcode function - LIMITED TO DIGITS 1,2,3,4 ONLY
 static void generate_passcode(const char *user_id) {
     if (system_shutdown_requested) {
         return;
@@ -769,10 +769,20 @@ static void generate_passcode(const char *user_id) {
         g_user_table.active_user_count++;
     }
     
-    // Generate passcode for this user
+    // Generate passcode for this user (digits 1-4 only)
     user_entry_t *user = &g_user_table.users[user_index];
     uint32_t seed = k_uptime_get_32() + (uint32_t)user_id[0] * 1000; // Add user variation
-    snprintf(user->passcode, sizeof(user->passcode), "%06u", (seed % 1000000));
+    
+    // Generate 6-digit passcode using only digits 1, 2, 3, 4
+    char passcode_digits[7]; // 6 digits + null terminator
+    for (int i = 0; i < 6; i++) {
+        seed = seed * 1103515245 + 12345; // Simple LCG for randomness
+        int digit = ((seed >> 16) % 4) + 1; // Get 1, 2, 3, or 4
+        passcode_digits[i] = '0' + digit;
+    }
+    passcode_digits[6] = '\0';
+    strcpy(user->passcode, passcode_digits);
+    
     strncpy(user->user_id, user_id, MAX_USER_ID_LEN - 1);
     user->user_id[MAX_USER_ID_LEN - 1] = '\0';
     user->timestamp = k_uptime_get_32();
@@ -1665,6 +1675,7 @@ static int cmd_validate_blockchain(const struct shell *sh, size_t argc, char **a
 
 static int cmd_verbose(const struct shell *sh, size_t argc, char **argv) {
     verbose = !verbose;
+    return 0;
 }
 
 // Updated shell commands with multi-user support
