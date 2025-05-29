@@ -32,8 +32,8 @@ class LockboxClient:
         self._connected = False
 
         self._tamper_state_names = {
-            0: "SAFE",
-            1: "DETECTED"
+            0: "RUN",
+            1: "STOP"
         }
 
         self._state_names = {
@@ -78,13 +78,13 @@ class LockboxClient:
 
         try:
             response = requests.post(url, headers=headers, json=payload)
-            logger.info(f"\n\nTagoIO response: {response.status_code}\n\n")
+            logger.info(f"TagoIO response: {response.status_code}")
             return True
         except Exception as e:
             logger.error(f"Failed to send to TagoIO: {e}")
             return False
 
-    async def monitor_and_send(self, interval=2):
+    async def monitor_and_send(self, interval=3):
         """Continuously monitor lockbox and send data to TagoIO"""
         self._tago_running = True
         
@@ -99,9 +99,8 @@ class LockboxClient:
                 # print("MONITORING...", user_status)
                 voc_data = await self.read_voc_data() or {}
                 # print("MONITORING...", voc_data)
-                tamper_state = await self.read_tamper_state()
+                tamper_state = await self.read_tamper_state() or "unkown"
                 # print("MONITORING...", voc_data)
-
                 
                 # Prepare data for TagoIO
                 data = {
@@ -114,9 +113,8 @@ class LockboxClient:
                     "tamper_detected": user_status.get('tamper_detected', False),
                     "current_voc": voc_data.get('current_voc', 0),
                     "voc_threshold": voc_data.get('threshold', 0),
-                    "tamper_state": tamper_state.get()
+                    "tamper_state": tamper_state
                 }
-                print(data)
                 
                 # Send to TagoIO
                 await self.send_to_tago(data)
@@ -134,12 +132,12 @@ class LockboxClient:
 
     async def _device_scan(self):
         while True:
-            logger.info("Scanning for SecureLockbox...")
+            logger.debug("Scanning for SecureLockbox...")
             devices = await BleakScanner.discover()
             
             self._device = next((d for d in devices if d.name == self._target_device_name), None)
             if self._device:
-                logger.info(f"Found SecureLockbox: {self._device.name} ({self._device.address})")
+                logger.debug(f"Found SecureLockbox: {self._device.name} ({self._device.address})")
                 return
             else: 
                 logger.error("SecureLockbox not found")
@@ -177,9 +175,9 @@ class LockboxClient:
         logger.info("Discovering services...")
         
         for service in self._client.services:
-            logger.info(f"Service: {service.uuid}")
+            logger.info(f"Service (): {service.uuid}", (f" {char.uuid}" if char.uuid in self._uuid_names else ""))
             for char in service.characteristics:
-                logger.info(f"  Characteristic: {char.uuid} - {char.properties}")
+                logger.info(f"  Characteristic (): {char.uuid} - {char.properties}", (f" {char.uuid}" if char.uuid in self._uuid_names else ""))
     
     async def read_username(self):
         """Read the current username from lockbox"""
@@ -188,11 +186,11 @@ class LockboxClient:
             return None
             
         try:
-            logger.info("Reading username")
+            logger.debug("Reading username")
             data = await self._client.read_gatt_char(USERNAME_CHAR_UUID)
             if data:
                 username = data.decode('utf-8', errors='ignore').strip('\x00')
-                logger.info(f"Current username: '{username}'")
+                logger.debug(f"Current username: '{username}'")
                 return username
             else:
                 logger.warning("No username data received")
@@ -225,12 +223,12 @@ class LockboxClient:
             return None
             
         try:
-            logger.info("Reading lock status...")
+            logger.debug("Reading lock status...")
             data = await self._client.read_gatt_char(LOCK_STATUS_CHAR_UUID)
             if data and len(data) >= 1:
                 status = data[0]
                 status_text = "OPEN" if status else "CLOSED"
-                logger.info(f"Lock status: {status_text}")
+                logger.debug(f"Lock status: {status_text}")
                 return status_text
             else:
                 logger.warning("No lock status data received")
@@ -247,7 +245,7 @@ class LockboxClient:
             return None
             
         try:
-            logger.info("Reading user status...")
+            logger.debug("Reading user status...")
             data = await self._client.read_gatt_char(USER_STATUS_CHAR_UUID)
             if data and len(data) >= 4:
                 state, failed_attempts, system_locked, tamper_detected = data[:4]
@@ -259,7 +257,7 @@ class LockboxClient:
                     'tamper_detected': bool(tamper_detected)
                 }
                 
-                logger.info(f"User status: {status}")
+                logger.debug(f"User status: {status}")
                 return status
             else:
                 logger.warning("No user status data received")
@@ -276,11 +274,11 @@ class LockboxClient:
             return None
             
         try:
-            logger.info("Reading passcode...")
+            logger.debug("Reading passcode...")
             data = await self._client.read_gatt_char(PASSCODE_CHAR_UUID)
             if data:
                 passcode = data.decode('utf-8', errors='ignore').strip('\x00')
-                logger.info(f"Current passcode: {passcode}")
+                logger.debug(f"Current passcode: {passcode}")
                 return passcode
             else:
                 logger.warning("No passcode data received")
@@ -317,7 +315,7 @@ class LockboxClient:
             return None
             
         try:
-            logger.info("Reading VOC data...")
+            logger.debug("Reading VOC data...")
             data = await self._client.read_gatt_char(VOC_SENSOR_CHAR_UUID)
             if data and len(data) >= 8:
                 # Unpack: current_voc (uint16), threshold (uint16), timestamp (uint32)
@@ -329,7 +327,7 @@ class LockboxClient:
                     'timestamp': timestamp
                 }
                 
-                logger.info(f"VOC data: {current_voc} PPB (threshold: {threshold} PPB)")
+                logger.debug(f"VOC data: {current_voc} PPB (threshold: {threshold} PPB)")
                 return voc_data
             else:
                 logger.warning("No VOC data received")
@@ -346,12 +344,12 @@ class LockboxClient:
             return None
         
         try:
-            logger.info("Reading tamper state...")
+            logger.debug("Reading tamper state...")
             data = await self._client.read_gatt_char(TAMPER_CONTROL_UUID)
             if data and len(data) >= 1:
                 state = data[0]
                 state_text = self._tamper_state_names[state]
-                logger.info(f"tamper state: {state_text}")
+                logger.debug(f"tamper state: {state_text}")
                 return state_text
             else:
                 logger.warning("No tamper state data received")
@@ -361,7 +359,7 @@ class LockboxClient:
             logger.error(f"Failed to read tamper state: {e}")
             return None
     
-    async def read_all_status(self):
+    async def print_all_status(self):
         """Read all status information"""
         logger.info("=== Reading All Status Information ===")
         
@@ -399,16 +397,6 @@ class LockboxClient:
             
             # Wait a moment for the lockbox to process
             await asyncio.sleep(1)
-            
-            # Read all status information
-            await self.read_all_status()
-            
-            print("\n=== Interactive Mode ===")
-            print("Commands:")
-            print("  'username <name>' - Set username")
-            print("  'passcode <code>' - Enter passcode")
-            print("  'status' - Read all status")
-            print("  'quit' - Exit")
         
         except:
             logger.error("STARTUP FAILED BUB")
@@ -424,9 +412,10 @@ class LockboxClient:
                 print("  'passcode <code>' - Enter passcode")
                 print("  'status' - Read all status")
                 print("  'quit' - Exit")
+                print("  'big-red-button' Shuts down the lockbox")
 
                 try:
-                    cmd = await asyncio.to_thread(input, "\nEnter command: ")
+                    cmd = await asyncio.to_thread(input, "Enter command...")
                     cmd = cmd.strip().split()
                         
                     if cmd[0] == 'quit':
@@ -440,10 +429,9 @@ class LockboxClient:
                         await asyncio.sleep(0.5)
                         await self.read_lock_status()  # Check if lock opened
                     elif cmd[0] == 'status':
-                        await self.read_all_status()
-                    elif cmd[0] == 'big-red-button':
-                        tamper_state = 1
-                        await self._client.write_gatt_char(TAMPER_CONTROL_UUID, tamper_state.encode('utf-8'))
+                        await self.print_all_status()
+                    elif cmd[0] == 'BIGREDBUTTON':
+                        await self._client.write_gatt_char(TAMPER_CONTROL_UUID, bytes([1]))
                     else:
                         print("Invalid command")
                         
@@ -454,6 +442,10 @@ class LockboxClient:
             print("\n\nOHNO\n\n")
             await self.stop_monitoring()
             await self.disconnect()
+            if cmd[0] == 'BIGREDBUTTON':
+                print("The BIG RED BUTTON worked!\n")
+            if cmd[0] == 'quit':
+                print('You quit the session\n')
 
 
 # Creates each thread as a task to run them sumultaneously.
