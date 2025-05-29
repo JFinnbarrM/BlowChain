@@ -78,7 +78,7 @@ class LockboxClient:
 
         try:
             response = requests.post(url, headers=headers, json=payload)
-            logger.info(f"TagoIO response: {response.status_code}")
+            logger.debug(f"TagoIO response: {response.status_code}")
             return True
         except Exception as e:
             logger.error(f"Failed to send to TagoIO: {e}")
@@ -115,6 +115,7 @@ class LockboxClient:
                     "voc_threshold": voc_data.get('threshold', 0),
                     "tamper_state": tamper_state
                 }
+                # print(data)
                 
                 # Send to TagoIO
                 await self.send_to_tago(data)
@@ -175,9 +176,9 @@ class LockboxClient:
         logger.info("Discovering services...")
         
         for service in self._client.services:
-            logger.info(f"Service (): {service.uuid}", (f" {char.uuid}" if char.uuid in self._uuid_names else ""))
+            logger.info(f"Service (): {service.uuid}")
             for char in service.characteristics:
-                logger.info(f"  Characteristic (): {char.uuid} - {char.properties}", (f" {char.uuid}" if char.uuid in self._uuid_names else ""))
+                logger.info(f"  Characteristic (): {char.uuid} - {char.properties}")
     
     async def read_username(self):
         """Read the current username from lockbox"""
