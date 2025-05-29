@@ -413,12 +413,15 @@ class LockboxClient:
                 print("  'passcode <code>' - Enter passcode")
                 print("  'status' - Read all status")
                 print("  'quit' - Exit")
-                print("  'big-red-button' Shuts down the lockbox")
+                print("  'BIGREDBUTTON' Shuts down the lockbox")
 
                 try:
                     cmd = await asyncio.to_thread(input, "Enter command...")
                     cmd = cmd.strip().split()
-                        
+                    
+                    if cmd[0] == "":
+                        continue
+
                     if cmd[0] == 'quit':
                         break
                     elif cmd[0] == 'username' and len(cmd) > 1:
