@@ -1,8 +1,3 @@
-/*
- * M5Stack Core 2 Raw Display Keypad with Bluetooth
- * 6-digit passcode with BLE advertising
- */
-
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
@@ -47,6 +42,8 @@ static button_t buttons[5]; /* 4 numbers + 1 enter button */
 static char passcode[PASSCODE_LENGTH + 1] = {0};
 static int passcode_pos = 0;
 static int bluetooth_ready = 0;
+
+static char* keypad_mac_str = "dc:dd:ee:dd:ee:35"; 
 
 /* Draw a filled rectangle */
 static void draw_rect(int x, int y, int w, int h, uint16_t color)
@@ -364,6 +361,19 @@ void bluetooth_init_keypad(void)
     }
 }
 
+// Add this in the main() function, right after LOG_INF("M5Stack Keypad with Bluetooth Starting");
+static void set_keypad_mac(void) {
+    bt_addr_le_t keypad_addr;
+    bt_addr_le_from_str(keypad_mac_str, "random", &keypad_addr);
+    
+    int err = bt_id_create(&keypad_addr, NULL);
+    if (err < 0) {
+        LOG_ERR("Failed to set keypad MAC address: %d", err);
+    } else {
+        LOG_INF("Keypad MAC address set to: %s", keypad_mac_str);
+    }
+}
+
 /* Define Bluetooth thread */
 K_THREAD_DEFINE(bt_thread, 2048, bluetooth_thread_keypad, NULL, NULL, NULL, 
                 K_PRIO_COOP(7), 0, 0);
@@ -371,6 +381,7 @@ K_THREAD_DEFINE(bt_thread, 2048, bluetooth_thread_keypad, NULL, NULL, NULL,
 int main(void)
 {
     LOG_INF("M5Stack Keypad with Bluetooth Starting");
+    
     
     /* Initialize display */
     display = DEVICE_DT_GET(DISPLAY_NODE);
@@ -385,6 +396,8 @@ int main(void)
     /* Initialize Bluetooth */
     bluetooth_init_keypad();
     LOG_INF("Bluetooth initialization started");
+
+    set_keypad_mac();
     
     /* Clear screen */
     draw_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);

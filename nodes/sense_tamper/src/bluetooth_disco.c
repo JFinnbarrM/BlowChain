@@ -1,108 +1,103 @@
 #include <zephyr/kernel.h>
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/logging/log.h>
+#include <string.h>
 #include <zephyr/device.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/printk.h>
+#include <zephyr/sys/util.h>
 #include <zephyr/bluetooth/hci.h>
-#include "new_sensor_lib.h"  // Your custom sensor library
+#include "new_sensor_lib.h"
 
-#define ADV_UPDATE_INTERVAL_MS 1000
-
-LOG_MODULE_REGISTER(disco_bt, LOG_LEVEL_INF);
+#define IBEACON_RSSI 0xFF
+#define NAME_LEN 30
+  
+static struct bt_data default_ad[] = {
+    BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_NO_BREDR),
+    BT_DATA_BYTES(BT_DATA_MANUFACTURER_DATA,
+              0x4c, 0x00, /* Apple */
+              0x02, 0x15, /* iBeacon */
+              0x00, 0x00, 0x00, 0x00, /* UUID[15..12] */
+              0x00, 0x00, /* UUID  [11..10] */
+              0x00, 0x00, /* UUID[9..8] */
+              0x00, 0x00, /* UUID[7..6] */
+              0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* UUID[5..0] */
+              0x00, 0x00, /* Major - will be updated */
+              0x00, 0x00, /* Minor - will be updated with distance */
+              IBEACON_RSSI) /* Calibrated RSSI @ 1m */
+};
 
 struct sensor_data {
     int x;
     int y;
     int z;
-    int xf;
+	int xf;
     int yf;
     int zf;
 };
 
-static int bluetooth_ready = 0;
-
-// Compact encoder: combine signed int and fraction into a byte pair
-static inline int8_t compress_sample(int value, int fraction) {
-    return (int8_t)(value);  // crude compression: just use whole number
-}
-
-static void start_advertising_disco(void)
-{
-    printk("Starting advertising...\n");
-
+static void start_advertising_disco(void) { 
+    printk("shall we start?\n");   
     struct bt_le_adv_param param = {
-        .options = BT_LE_ADV_OPT_USE_IDENTITY,
+        .options = BT_LE_ADV_OPT_USE_IDENTITY | BT_LE_ADV_OPT_CONNECTABLE,
         .interval_min = BT_GAP_ADV_FAST_INT_MIN_2,
         .interval_max = BT_GAP_ADV_FAST_INT_MAX_2,
-        .id = 0,
+        .id = 0, 
     };
-
-    struct bt_data ad[] = {
-        BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_NO_BREDR),
-        // Initial dummy manufacturer data, will be updated
-        BT_DATA_BYTES(BT_DATA_MANUFACTURER_DATA, 0x4C, 0x00, 0x01, 0x02, 0x03),
-    };
-
-    int err = bt_le_adv_start(&param, ad, ARRAY_SIZE(ad), NULL, 0);
-    if (err) {
-        printk("Failed to start advertising (err %d)\n", err);
-        return;
-    }
-
-    printk("Advertising started successfully\n");
+    
+    bt_le_adv_start(&param, default_ad, ARRAY_SIZE(default_ad), NULL, 0);
+    printk("yes we shall!\n");
 
     while (1) {
         struct sensor_data a = convert_and_collect(accel, SENSOR_CHAN_ACCEL_XYZ);
         struct sensor_data m = convert_and_collect(magneto, SENSOR_CHAN_MAGN_XYZ);
 
-        // Compress sensor data into raw bytes
-        uint8_t sensor_payload[] = {
-            0x4C, 0x00, // Apple company ID (example)
-            compress_sample(m.x, m.xf),
-            compress_sample(m.y, m.yf),
-            compress_sample(m.z, m.zf),
-            compress_sample(a.x, a.xf),
-            compress_sample(a.y, a.yf),
-            compress_sample(a.z, a.zf),
-        };
+        a.z -= 10;
 
-        struct bt_data updated_ad[] = {
+        struct bt_data dynamic_ad[] = {
             BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_NO_BREDR),
-            BT_DATA(BT_DATA_MANUFACTURER_DATA, sensor_payload, sizeof(sensor_payload)),
+            BT_DATA_BYTES(BT_DATA_MANUFACTURER_DATA,
+            0x4c, 0x00, /* Apple */
+            0x02, 0x15, /* iBeacon */
+            0x00, 0x00, 0x00, 0x00, /* UUID[15..12] */
+            0x00, 0x00, /* UUID  [11..10] */
+            0x00, 0x00, /* UUID[9..8] */
+            0x00, m.x, /* UUID[7..6] */
+            m.xf, m.y, m.yf, m.z, m.zf, a.x, /* UUID[5..0] */
+            a.xf, a.y, /* Major - will be updated */
+            a.yf, a.z, /* Minor - will be updated with distance */
+            a.zf) /* Calibrated RSSI @ 1m */
         };
 
-        err = bt_le_adv_update_data(updated_ad, ARRAY_SIZE(updated_ad), NULL, 0);
-        printk("Advertising update result: %d\n", err);
+        printk("Magnetometer: X: %d.%02dµT Y: %d.%02dµT Z: %d.%02dµT\n", 
+        m.x, m.xf,
+        m.y, m.yf,
+        m.z, m.zf);
 
-        printk("Accel: X=%d Y=%d Z=%d | Mag: X=%d Y=%d Z=%d\n",
-               a.x, a.y, a.z, m.x, m.y, m.z);
+        printk("Accelerometer: X: %d.%02d ms/2 Y: %d.%02dms/2 Z: %d.%02dms/2\n", 
+                a.x, a.xf,
+                a.y, a.yf,
+                a.z, a.zf);
 
-        k_msleep(ADV_UPDATE_INTERVAL_MS);
+        // bt_le_adv_update_data(dynamic_ad, ARRAY_SIZE(dynamic_ad), NULL, 0);
+            // k_sleep(K_MSEC(2000));
+        printk("Advertising update result: %d\n", bt_le_adv_update_data(dynamic_ad, ARRAY_SIZE(dynamic_ad), NULL, 0));
+        k_msleep(1000);
     }
 }
 
-void sender_thread_disco(void)
-{
-    while (!bluetooth_ready) {
-        k_msleep(100);
-    }
+void sender_thread_disco(void) {
+    printf("gonna try :)\n");
+    k_sleep(K_MSEC(3000));
     start_advertising_disco();
+    printf("adv started!!!!!\n");
 }
 
-void bluetooth_ready_cb(int err)
-{
-    if (err) {
-        printk("Bluetooth init failed (err %d)\n", err);
-        return;
-    }
-    printk("Bluetooth initialized\n");
-    bluetooth_ready = 1;
-}
-
-void bluetooth_init_disco(void)
-{
-    int err = bt_enable(bluetooth_ready_cb);
-    if (err) {
-        printk("bt_enable failed (err %d)\n", err);
-    }
+void bluetooth_init_disco(void) {
+    k_sleep(K_MSEC(3000));
+  bt_addr_le_t mobile_addr;
+  printf("1: %d\n", bt_addr_le_from_str("DA:BB:CC:BB:CC:FF", "random", &mobile_addr));
+  printf("2: %d\n", bt_id_create(&mobile_addr, NULL));
+  printf("3: %d\n", bt_enable(NULL));
+  printf("hiya\n");
 }
