@@ -378,35 +378,34 @@ class LockboxClient:
 
     async def user_loop(self):
         """Main function demonstrating usage"""        
-        # try:
-        #     while True:
-        #         try:
-        #             cmd = input("\nEnter command: ").strip().split()
-        #             if not cmd:
-        #                 continue
+        try:
+            while True:
+                try:
+                    cmd = await asyncio.to_thread(input, "\nEnter command: ")
+                    cmd = cmd.strip().split()
                         
-        #             if cmd[0] == 'quit':
-        #                 break
-        #             elif cmd[0] == 'username' and len(cmd) > 1:
-        #                 await self.set_username(cmd[1])
-        #                 await asyncio.sleep(0.5)
-        #                 await self.read_passcode()  # Read the generated passcode
-        #             elif cmd[0] == 'passcode' and len(cmd) > 1:
-        #                 await self.enter_passcode(cmd[1])
-        #                 await asyncio.sleep(0.5)
-        #                 await self.read_lock_status()  # Check if lock opened
-        #             elif cmd[0] == 'status':
-        #                 await self.read_all_status()
-        #             else:
-        #                 print("Invalid command")
+                    if cmd[0] == 'quit':
+                        break
+                    elif cmd[0] == 'username' and len(cmd) > 1:
+                        await self.set_username(cmd[1])
+                        await asyncio.sleep(0.5)
+                        await self.read_passcode()  # Read the generated passcode
+                    elif cmd[0] == 'passcode' and len(cmd) > 1:
+                        await self.enter_passcode(cmd[1])
+                        await asyncio.sleep(0.5)
+                        await self.read_lock_status()  # Check if lock opened
+                    elif cmd[0] == 'status':
+                        await self.read_all_status()
+                    else:
+                        print("Invalid command")
                         
-        #         except KeyboardInterrupt:
-        #             break
+                except KeyboardInterrupt:
+                    break
         
-        # finally:
-        #     print("\n\nOHNO\n\n")
-        #     await self.stop_monitoring()
-        #     await self.disconnect()
+        finally:
+            print("\n\nOHNO\n\n")
+            await self.stop_monitoring()
+            await self.disconnect()
 
 
 # Creates each thread as a task to run them sumultaneously.
