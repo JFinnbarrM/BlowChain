@@ -54,7 +54,7 @@ typedef enum {
     TX_TAMPER_DETECTED,
     TX_SYSTEM_LOCKED,
     TX_SYSTEM_STARTUP,
-    TX_SYSTEM_SHUTDOWN  // NEW: System shutdown transaction
+    TX_SYSTEM_SHUTDOWN
 } transaction_type_t;
 
 typedef enum {
@@ -435,7 +435,6 @@ static int add_transaction(transaction_type_t type, const char *user_id, const c
     return 0;
 }
 
-// NEW: System shutdown function
 static void trigger_system_shutdown(const char *reason) {
     LOG_ERR("=== INITIATING SYSTEM SHUTDOWN ===");
     LOG_ERR("Reason: %s", reason);
@@ -447,16 +446,12 @@ static void trigger_system_shutdown(const char *reason) {
     g_lockbox_state.state = STATE_SHUTDOWN;
     k_mutex_unlock(&lockbox_mutex);
     
-    // Signal shutdown to all threads
     system_shutdown_requested = true;
     
-    // Record shutdown transaction
     add_transaction(TX_SYSTEM_SHUTDOWN, "SYSTEM", reason);
-    
-    // Close and lock the physical lock
+=
     lock_close();
     
-    // Disconnect all BLE connections
     k_mutex_lock(&connections_mutex, K_FOREVER);
     for (int i = 0; i < MAX_BLE_CONNECTIONS; i++) {
         if (connections[i].is_active) {
@@ -468,17 +463,14 @@ static void trigger_system_shutdown(const char *reason) {
     }
     k_mutex_unlock(&connections_mutex);
     
-    // Stop BLE advertising
     bt_le_adv_stop();
-    
-    // Send critical alert
+
     send_alert_to_dashboard("CRITICAL: System shutdown initiated - All operations halted");
     
     LOG_ERR("=== SYSTEM SHUTDOWN COMPLETE ===");
     LOG_ERR("All operations halted. System requires physical reset.");
 }
 
-// NEW: Tamper control GATT handlers
 static ssize_t write_tamper_control(struct bt_conn *conn, const struct bt_gatt_attr *attr,
                                    const void *buf, uint16_t len, uint16_t offset, uint8_t flags) {
     if (len != 1) {

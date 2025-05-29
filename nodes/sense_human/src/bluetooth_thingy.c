@@ -8,6 +8,7 @@
 #include <zephyr/sys/util.h>
 #include <zephyr/bluetooth/hci.h>
 #include "new_sensor_lib.h"
+#include "led_lib.h"
 
 #define IBEACON_RSSI 0xFF
 #define NAME_LEN 30
@@ -42,7 +43,11 @@ static void start_advertising_thingy(void) {
 
     while (1) {
         uint32_t voc = convert_and_collect(gas, SENSOR_CHAN_VOC);
-        // voc = 500;
+        if (voc > 250) {
+            set_colour(1, 0, 1);
+        } else {
+            set_colour(1, 1, 1);
+        }
         struct bt_data dynamic_ad[] = {
             BT_DATA_BYTES(BT_DATA_FLAGS, BT_LE_AD_NO_BREDR),
             BT_DATA_BYTES(BT_DATA_MANUFACTURER_DATA,
