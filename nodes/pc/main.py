@@ -1,18 +1,26 @@
 
 import asyncio
+import logging
+from bleak import BleakScanner, BleakClient
+from bleak.backends.characteristic import BleakGATTCharacteristic
+import struct
+import sys
 
-from lockbox_client import LockboxClient
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Creates each thread as a task to run them sumultaneously.
-async def main():
-    # Create tasks for all required functions.
-    lockbox_client = LockboxClient()
-    task_lockbox_client = asyncio.create_task(lockbox_client.run())
-    
-    # Wait for all tasks (will run concurrently)
-    await asyncio.gather(
-        task_lockbox_client
-    )
+class BlowChainClient:
+    async def __init__(self):
+        self._device_name = "SecureLockbox"
+        self._device = await self._device_scan()
+        
+
+    async def _device_scan(self):
+        logger.info("Scanning for blowchain...")
+        devices = await BleakScanner.discover()
+
+
+
 
 # When the script is run, start the main function.
 if __name__ == "__main__":
