@@ -31,6 +31,11 @@ class LockboxClient:
         self._device = None
         self._connected = False
 
+        self._tamper_state_names = {
+            0: "SAFE",
+            1: "DETECTED"
+        }
+
         self._state_names = {
             0: "READY",
             1: "PRESENCE_DETECTED", 
@@ -87,27 +92,29 @@ class LockboxClient:
             try:
                 # Get all status data
                 username = await self.read_username() or "unknown"
-                print("MONITORING...", username)
+                # print("MONITORING...", username)
                 lock_status = await self.read_lock_status() or "unknown"
-                print("MONITORING...", lock_status)
+                # print("MONITORING...", lock_status)
                 user_status = await self.read_user_status() or {}
-                print("MONITORING...", user_status)
+                # print("MONITORING...", user_status)
                 voc_data = await self.read_voc_data() or {}
-                print("MONITORING...", voc_data)
+                # print("MONITORING...", voc_data)
+                tamper_state = await self.read_tamper_state()
+                # print("MONITORING...", voc_data)
 
                 
                 # Prepare data for TagoIO
                 data = {
-                    "test": 69,
                     "time": time.time(),
                     "username": username,
                     "lock_status": lock_status,
-                    "state": user_status.get('state', 'UNKOWN'),
+                    "state": user_status.get('state', 'UNKNOWN'),
                     "system_locked": user_status.get('system_locked', False),
                     "failed_attempts": user_status.get('failed_attempts', 0),
                     "tamper_detected": user_status.get('tamper_detected', False),
                     "current_voc": voc_data.get('current_voc', 0),
                     "voc_threshold": voc_data.get('threshold', 0),
+                    "tamper_state": tamper_state.get()
                 }
                 print(data)
                 
@@ -181,7 +188,7 @@ class LockboxClient:
             return None
             
         try:
-            logger.info("Reading username...")
+            logger.info("Reading username")
             data = await self._client.read_gatt_char(USERNAME_CHAR_UUID)
             if data:
                 username = data.decode('utf-8', errors='ignore').strip('\x00')
@@ -331,6 +338,28 @@ class LockboxClient:
         except Exception as e:
             logger.error(f"Failed to read VOC data: {e}")
             return None
+        
+    async def read_tamper_state(self):
+        """Read tamper state info"""
+        if not self._client or not self._connected:
+            logger.error("Not connected")
+            return None
+        
+        try:
+            logger.info("Reading tamper state...")
+            data = await self._client.read_gatt_char(TAMPER_CONTROL_UUID)
+            if data and len(data) >= 1:
+                state = data[0]
+                state_text = self._tamper_state_names[state]
+                logger.info(f"tamper state: {state_text}")
+                return state_text
+            else:
+                logger.warning("No tamper state data received")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Failed to read tamper state: {e}")
+            return None
     
     async def read_all_status(self):
         """Read all status information"""
@@ -341,6 +370,7 @@ class LockboxClient:
         user_status = await self.read_user_status()
         passcode = await self.read_passcode()
         voc_data = await self.read_voc_data()
+        tamper_state = await self.read_tamper_state()
         
         print("\n=== LOCKBOX STATUS ===")
         print(f"Username: {username}")
@@ -348,7 +378,8 @@ class LockboxClient:
         print(f"User Status: {user_status}")
         print(f"Passcode: {passcode}")
         print(f"VOC Data: {voc_data}")
-        print("=" * 25)
+        print(f"Tamper State: {tamper_state}")
+        print("=======================")
 
     async def start(self):
         try:
@@ -410,6 +441,9 @@ class LockboxClient:
                         await self.read_lock_status()  # Check if lock opened
                     elif cmd[0] == 'status':
                         await self.read_all_status()
+                    elif cmd[0] == 'big-red-button':
+                        tamper_state = 1
+                        await self._client.write_gatt_char(TAMPER_CONTROL_UUID, tamper_state.encode('utf-8'))
                     else:
                         print("Invalid command")
                         
