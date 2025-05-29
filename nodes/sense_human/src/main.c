@@ -6,6 +6,8 @@
 
 K_THREAD_DEFINE(voc_tid, MY_STACK_SIZE * 4,  sender_thread_thingy, NULL, NULL, NULL, COMMON_PRIORITY, 0, 0);
 
+
+
 int main(void) {
     bluetooth_init_thingy();
     printf("done!\n");
