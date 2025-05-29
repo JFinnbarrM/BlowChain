@@ -41,6 +41,8 @@ static char* static_mac_str =  "dc:80:00:00:08:35";
 #define BT_UUID_VOC_SENSOR           BT_UUID_DECLARE_16(0xFF06)
 #define BT_UUID_TAMPER_CONTROL       BT_UUID_DECLARE_16(0x1107)  // NEW: Tamper control
 
+static bool verbose = false;
+
 typedef enum {
     TX_USER_ADDED = 1,
     TX_ACCESS_GRANTED,
@@ -1661,6 +1663,10 @@ static int cmd_validate_blockchain(const struct shell *sh, size_t argc, char **a
     return ret;
 }
 
+static int cmd_verbose(const struct shell *sh, size_t argc, char **argv) {
+    verbose = !verbose;
+}
+
 // Updated shell commands with multi-user support
 SHELL_STATIC_SUBCMD_SET_CREATE(lockbox_cmds,
     SHELL_CMD(status, NULL, "Show lockbox and blockchain status", cmd_status),
@@ -1678,6 +1684,7 @@ SHELL_STATIC_SUBCMD_SET_CREATE(lockbox_cmds,
     SHELL_CMD(history, NULL, "Show user transaction history", cmd_history),
     SHELL_CMD(validate, NULL, "Validate blockchain integrity", cmd_validate_blockchain),
     SHELL_CMD(reset, NULL, "Reset blockchain (WARNING: Destructive!)", cmd_reset),
+    SHELL_CMD(verbose, NULL, "Toggle verbosity", cmd_verbose),
     SHELL_SUBCMD_SET_END
 );
 
@@ -1756,7 +1763,7 @@ static void device_found(
         if (ad->len >= 27) {
             uint16_t voc_value = (data[25] << 8) | data[26];
             process_voc_reading(voc_value);
-            LOG_INF("BLE: VOC data received: %d PPB", voc_value);
+            if (verbose) {LOG_INF("BLE: VOC data received: %d PPB", voc_value);}
         } else {
             LOG_WRN("BLE: VOC data too short (len = %u)", ad->len);
         }
@@ -1788,15 +1795,17 @@ static void device_found(
 
             process_tamper_reading(a, m);
 
-            LOG_INF("Magnetometer: X: %d.%02dµT Y: %d.%02dµT Z: %d.%02dµT", 
+            if (verbose) {
+                LOG_INF("Magnetometer: X: %d.%02dµT Y: %d.%02dµT Z: %d.%02dµT", 
                     m.x, m.xf,
                     m.y, m.yf,
                     m.z, m.zf);
 
-            LOG_INF("Accelerometer: X: %d.%02dg Y: %d.%02dg Z: %d.%02dg", 
+                LOG_INF("Accelerometer: X: %d.%02dg Y: %d.%02dg Z: %d.%02dg", 
                     a.x, a.xf,
                     a.y, a.yf,
                     a.z, a.zf);
+            }
         }
     }
 }
