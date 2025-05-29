@@ -1,8 +1,3 @@
-/*
- * M5Stack Core 2 Raw Display Keypad with Bluetooth
- * 6-digit passcode with BLE advertising
- */
-
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/display.h>
@@ -20,12 +15,11 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 #define DISPLAY_NODE DT_CHOSEN(zephyr_display)
 #define TOUCH_NODE DT_CHOSEN(zephyr_touch)
 
-/* Display properties */
 #define SCREEN_WIDTH  320
 #define SCREEN_HEIGHT 240
-#define BUTTON_WIDTH  60
-#define BUTTON_HEIGHT 40
-#define BUTTON_GAP    10
+#define BUTTON_WIDTH  140  // Button width
+#define BUTTON_HEIGHT 50   // Button height
+#define BUTTON_GAP    10   // Space between buttons
 
 /* Colors (RGB565) */
 #define COLOR_BLACK     0x0000
@@ -44,10 +38,12 @@ typedef struct {
 
 /* Global variables */
 static const struct device *display;
-static button_t buttons[10]; /* 9 numbers + 1 clear */
+static button_t buttons[5]; /* 4 numbers + 1 enter button */
 static char passcode[PASSCODE_LENGTH + 1] = {0};
 static int passcode_pos = 0;
 static int bluetooth_ready = 0;
+
+static char* keypad_mac_str = "dc:dd:ee:dd:ee:35"; 
 
 /* Draw a filled rectangle */
 static void draw_rect(int x, int y, int w, int h, uint16_t color)
@@ -127,6 +123,31 @@ static void draw_text(int x, int y, const char *text, uint16_t color)
     }
 }
 
+
+/* Button positions */
+static void init_buttons(void)
+{
+    /* 2x2 grid for numbers 1-4 */
+    for (int i = 0; i < 4; i++) {
+        int row = i / 2;  // Determine row (0 or 1)
+        int col = i % 2;  // Determine column (0 or 1)
+        
+        // Shift numbers more to the left
+        buttons[i].x = 20 + col * (BUTTON_WIDTH + BUTTON_GAP);  
+        buttons[i].y = 80 + row * (BUTTON_HEIGHT + BUTTON_GAP); 
+        buttons[i].w = BUTTON_WIDTH;
+        buttons[i].h = BUTTON_HEIGHT;
+        buttons[i].number = i + 1;
+    }
+    
+    /* Enter button */
+    buttons[4].x = 90;
+    buttons[4].y = 200;  // Back to original position
+    buttons[4].w = BUTTON_WIDTH;
+    buttons[4].h = BUTTON_HEIGHT;
+    buttons[4].number = -1;  // No number associated with the Enter button
+}
+
 /* Draw a button */
 static void draw_button(button_t *btn, bool pressed)
 {
@@ -143,35 +164,12 @@ static void draw_button(button_t *btn, bool pressed)
     draw_rect(btn->x + btn->w - 1, btn->y, 1, btn->h, border_color); /* right */
     
     /* Draw button text */
-    if (btn->number >= 1 && btn->number <= 9) {
+    if (btn->number >= 1 && btn->number <= 4) {
         char text[2] = {'0' + btn->number, '\0'};
-        draw_text(btn->x + btn->w/2 - 3, btn->y + btn->h/2 - 3, text, COLOR_WHITE);
+        draw_text(btn->x + btn->w / 2 - 3, btn->y + btn->h / 2 - 3, text, COLOR_WHITE);
     } else if (btn->number == 0) {
-        draw_text(btn->x + 8, btn->y + btn->h/2 - 3, "CLR", COLOR_WHITE);
+        draw_text(btn->x + 8, btn->y + btn->h / 2 - 3, "ENTER", COLOR_WHITE);
     }
-}
-
-/* Initialize button positions */
-static void init_buttons(void)
-{
-    /* 3x3 grid for numbers 1-9 */
-    for (int i = 0; i < 9; i++) {
-        int row = i / 3;
-        int col = i % 3;
-        
-        buttons[i].x = 80 + col * (BUTTON_WIDTH + BUTTON_GAP);
-        buttons[i].y = 80 + row * (BUTTON_HEIGHT + BUTTON_GAP);
-        buttons[i].w = BUTTON_WIDTH;
-        buttons[i].h = BUTTON_HEIGHT;
-        buttons[i].number = i + 1;
-    }
-    
-    /* Clear button */
-    buttons[9].x = 130;
-    buttons[9].y = 200;
-    buttons[9].w = BUTTON_WIDTH;
-    buttons[9].h = 30;
-    buttons[9].number = 0; /* 0 = clear */
 }
 
 /* Update display with current passcode */
@@ -202,19 +200,26 @@ static void update_display(void)
 /* Check if point is inside button */
 static int point_in_button(int x, int y)
 {
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 4; i++) { // Check for 4 buttons (1-4)
         if (x >= buttons[i].x && x < buttons[i].x + buttons[i].w &&
             y >= buttons[i].y && y < buttons[i].y + buttons[i].h) {
             return i;
         }
     }
-    return -1;
+    // Check for the Enter button (button index 4)
+    if (x >= buttons[4].x && x < buttons[4].x + buttons[4].w &&
+        y >= buttons[4].y && y < buttons[4].y + buttons[4].h) {
+        return 4; // Enter button
+    }
+
+    return -1;  // Return -1 if no button is pressed
 }
+
 
 /* Handle button press */
 static void handle_button_press(int btn_idx)
 {
-    if (btn_idx < 0 || btn_idx >= 10) return;
+    if (btn_idx < 0 || btn_idx >= 5) return;
     
     button_t *btn = &buttons[btn_idx];
     
@@ -223,7 +228,7 @@ static void handle_button_press(int btn_idx)
     k_msleep(100);
     draw_button(btn, false);
     
-    if (btn->number >= 1 && btn->number <= 9) {
+    if (btn->number >= 1 && btn->number <= 4) {
         /* Number button */
         if (passcode_pos < PASSCODE_LENGTH) {
             passcode[passcode_pos++] = '0' + btn->number;
@@ -235,10 +240,10 @@ static void handle_button_press(int btn_idx)
             }
         }
     } else if (btn->number == 0) {
-        /* Clear button */
-        passcode_pos = 0;
-        memset(passcode, 0, sizeof(passcode));
-        LOG_INF("Passcode cleared");
+        /* Enter button */
+        if (passcode_pos == PASSCODE_LENGTH) {
+            LOG_INF("Passcode entered: %s", passcode);
+        }
     }
     
     /* Update display */
@@ -356,6 +361,19 @@ void bluetooth_init_keypad(void)
     }
 }
 
+// Add this in the main() function, right after LOG_INF("M5Stack Keypad with Bluetooth Starting");
+static void set_keypad_mac(void) {
+    bt_addr_le_t keypad_addr;
+    bt_addr_le_from_str(keypad_mac_str, "random", &keypad_addr);
+    
+    int err = bt_id_create(&keypad_addr, NULL);
+    if (err < 0) {
+        LOG_ERR("Failed to set keypad MAC address: %d", err);
+    } else {
+        LOG_INF("Keypad MAC address set to: %s", keypad_mac_str);
+    }
+}
+
 /* Define Bluetooth thread */
 K_THREAD_DEFINE(bt_thread, 2048, bluetooth_thread_keypad, NULL, NULL, NULL, 
                 K_PRIO_COOP(7), 0, 0);
@@ -363,6 +381,7 @@ K_THREAD_DEFINE(bt_thread, 2048, bluetooth_thread_keypad, NULL, NULL, NULL,
 int main(void)
 {
     LOG_INF("M5Stack Keypad with Bluetooth Starting");
+    
     
     /* Initialize display */
     display = DEVICE_DT_GET(DISPLAY_NODE);
@@ -377,6 +396,8 @@ int main(void)
     /* Initialize Bluetooth */
     bluetooth_init_keypad();
     LOG_INF("Bluetooth initialization started");
+
+    set_keypad_mac();
     
     /* Clear screen */
     draw_rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, COLOR_BLACK);
