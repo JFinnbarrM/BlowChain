@@ -28,6 +28,10 @@ static char* static_mac_str =  "dc:80:00:00:08:35";
 #define PASSCODE_LEN 6
 #define MAX_BLE_CONNECTIONS 4
 
+// Multi-user support definitions
+#define MAX_USERS 10
+#define PASSCODE_EXPIRE_TIME_MS (5 * 60 * 1000)  // 5 minutes
+
 #define BT_UUID_LOCKBOX_SERVICE      BT_UUID_DECLARE_16(0x1234)
 #define BT_UUID_USERNAME             BT_UUID_DECLARE_16(0xAA01)
 #define BT_UUID_BLOCK_INFO           BT_UUID_DECLARE_16(0xBB02)
@@ -112,6 +116,19 @@ typedef struct {
     bool block_notifications_enabled;
 } connection_info_t;
 
+// Multi-user support structures
+typedef struct {
+    char user_id[MAX_USER_ID_LEN];
+    char passcode[PASSCODE_LEN + 1]; 
+    uint32_t timestamp;
+    bool is_active;
+} user_entry_t;
+
+typedef struct {
+    user_entry_t users[MAX_USERS];
+    int active_user_count;
+} user_table_t;
+
 static blockchain_data_t g_blockchain;
 static lockbox_state_t g_lockbox_state = {0};
 static struct k_mutex blockchain_mutex;
@@ -119,6 +136,10 @@ static struct k_mutex lockbox_mutex;
 static struct k_msgq pending_tx_queue;
 static simple_transaction_t pending_tx_buffer[10];
 static char current_username[MAX_USER_ID_LEN] = "UNKNOWN";
+
+// Multi-user globals
+static user_table_t g_user_table = {0};
+static struct k_mutex user_table_mutex;
 
 #define VOC_PRESENCE_THRESHOLD 250
 static connection_info_t connections[MAX_BLE_CONNECTIONS];
@@ -147,6 +168,13 @@ static void set_connection_type(struct bt_conn *conn, client_type_t type, const 
 
 // Blockchain function declarations
 static int add_transaction(transaction_type_t type, const char *user_id, const char *data);
+
+// Multi-user function declarations
+static int find_user_index(const char *user_id);
+static int find_free_user_slot(void);
+static void cleanup_expired_passcodes(void);
+static void generate_passcode(const char *user_id);
+static bool verify_passcode(const char *user_id, const char *entered_code);
 
 FS_LITTLEFS_DECLARE_DEFAULT_CONFIG(storage);
 static struct fs_mount_t blockchain_fs_mount = {
@@ -227,6 +255,41 @@ static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_NAME_COMPLETE, "SecureLockbox"),
     BT_DATA_BYTES(BT_DATA_UUID16_ALL, 0x34, 0x12),
 };
+
+// Multi-user helper functions
+static int find_user_index(const char *user_id) {
+    for (int i = 0; i < MAX_USERS; i++) {
+        if (g_user_table.users[i].is_active && 
+            strcmp(g_user_table.users[i].user_id, user_id) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int find_free_user_slot(void) {
+    for (int i = 0; i < MAX_USERS; i++) {
+        if (!g_user_table.users[i].is_active) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void cleanup_expired_passcodes(void) {
+    uint32_t current_time = k_uptime_get_32();
+    
+    for (int i = 0; i < MAX_USERS; i++) {
+        if (g_user_table.users[i].is_active) {
+            uint32_t age = current_time - g_user_table.users[i].timestamp;
+            if (age > PASSCODE_EXPIRE_TIME_MS) {
+                LOG_INF("Passcode expired for user: %s", g_user_table.users[i].user_id);
+                memset(&g_user_table.users[i], 0, sizeof(user_entry_t));
+                g_user_table.active_user_count--;
+            }
+        }
+    }
+}
 
 // Connection management functions
 static int find_free_connection_slot(void) {
@@ -655,28 +718,60 @@ static int create_new_block(simple_transaction_t *transactions, int tx_count) {
     return save_blockchain();
 }
 
+// Updated multi-user generate_passcode function
 static void generate_passcode(const char *user_id) {
     if (system_shutdown_requested) {
         return;
     }
     
+    k_mutex_lock(&user_table_mutex, K_FOREVER);
+    
+    // Clean up expired passcodes first
+    cleanup_expired_passcodes();
+    
+    // Check if user already has an active passcode
+    int user_index = find_user_index(user_id);
+    
+    if (user_index == -1) {
+        // New user - find free slot
+        user_index = find_free_user_slot();
+        if (user_index == -1) {
+            LOG_ERR("User table full! Cannot add user: %s", user_id);
+            k_mutex_unlock(&user_table_mutex);
+            return;
+        }
+        g_user_table.active_user_count++;
+    }
+    
+    // Generate passcode for this user
+    user_entry_t *user = &g_user_table.users[user_index];
+    uint32_t seed = k_uptime_get_32() + (uint32_t)user_id[0] * 1000; // Add user variation
+    snprintf(user->passcode, sizeof(user->passcode), "%06u", (seed % 1000000));
+    strncpy(user->user_id, user_id, MAX_USER_ID_LEN - 1);
+    user->user_id[MAX_USER_ID_LEN - 1] = '\0';
+    user->timestamp = k_uptime_get_32();
+    user->is_active = true;
+    
+    k_mutex_unlock(&user_table_mutex);
+    
+    // Log transaction
+    char data[MAX_DATA_LEN];
+    snprintf(data, sizeof(data), "Passcode: %s", user->passcode);
+    add_transaction(TX_PASSCODE_GENERATED, user_id, data);
+    
+    // Update single-user state for compatibility
     k_mutex_lock(&lockbox_mutex, K_FOREVER);
-    uint32_t seed = k_uptime_get_32();
-    snprintf(g_lockbox_state.current_passcode, sizeof(g_lockbox_state.current_passcode), 
-             "%06u", (seed % 1000000));
     strcpy(g_lockbox_state.current_user, user_id);
+    strcpy(g_lockbox_state.current_passcode, user->passcode);
     strcpy(current_username, user_id);
-    g_lockbox_state.passcode_timestamp = k_uptime_get_32();
+    g_lockbox_state.passcode_timestamp = user->timestamp;
     g_lockbox_state.failed_attempts = 0;
     k_mutex_unlock(&lockbox_mutex);
     
-    char data[MAX_DATA_LEN];
-    snprintf(data, sizeof(data), "Passcode: %s", g_lockbox_state.current_passcode);
-    add_transaction(TX_PASSCODE_GENERATED, user_id, data);
-    
     notify_user_status();
     
-    LOG_INF("Passcode generated for %s: %s", user_id, g_lockbox_state.current_passcode);
+    LOG_INF("Passcode generated for %s: %s (%d active users)", 
+            user_id, user->passcode, g_user_table.active_user_count);
 }
 
 static void process_voc_reading(uint16_t voc_ppb) {
@@ -703,9 +798,7 @@ static void process_voc_reading(uint16_t voc_ppb) {
             
             char data[MAX_DATA_LEN];
             snprintf(data, sizeof(data), "VOC presence: %u PPB", voc_ppb);
-            const char* user_for_log = strlen(g_lockbox_state.current_user) > 0 ? 
-                                      g_lockbox_state.current_user : "UNKNOWN";
-            add_transaction(TX_PRESENCE_DETECTED, user_for_log, data);
+            add_transaction(TX_PRESENCE_DETECTED, "SYSTEM", data);
             
             k_mutex_lock(&lockbox_mutex, K_FOREVER);
             g_lockbox_state.state = STATE_WAITING_PASSCODE;
@@ -713,7 +806,7 @@ static void process_voc_reading(uint16_t voc_ppb) {
             
             notify_user_status();
             
-            LOG_INF("System ready for passcode entry (VOC triggered - user independent)");
+            LOG_INF("System ready for any user to enter their credentials");
         } else {
             LOG_DBG("VOC threshold exceeded but system not ready (state: %d)", g_lockbox_state.state);
             k_mutex_unlock(&lockbox_mutex);
@@ -721,23 +814,49 @@ static void process_voc_reading(uint16_t voc_ppb) {
     }
 }
 
+// Updated multi-user verify_passcode function
 static bool verify_passcode(const char *user_id, const char *entered_code) {
     if (system_shutdown_requested) {
         return false;
     }
     
     k_mutex_lock(&lockbox_mutex, K_FOREVER);
-    
     if (g_lockbox_state.state != STATE_WAITING_PASSCODE) {
         k_mutex_unlock(&lockbox_mutex);
         return false;
     }
+    k_mutex_unlock(&lockbox_mutex);
     
-    bool success = (strcmp(entered_code, g_lockbox_state.current_passcode) == 0);
+    k_mutex_lock(&user_table_mutex, K_FOREVER);
+    
+    // Clean up expired passcodes
+    cleanup_expired_passcodes();
+    
+    // Find the user
+    int user_index = find_user_index(user_id);
+    if (user_index == -1) {
+        LOG_WRN("User not found or no active passcode: %s", user_id);
+        k_mutex_unlock(&user_table_mutex);
+        return false;
+    }
+    
+    user_entry_t *user = &g_user_table.users[user_index];
+    bool success = (strcmp(entered_code, user->passcode) == 0);
     
     if (success) {
+        // Remove this user's passcode after successful verification
+        LOG_INF("Passcode verified for %s - removing from active list", user_id);
+        memset(user, 0, sizeof(user_entry_t));
+        g_user_table.active_user_count--;
+        
+        k_mutex_unlock(&user_table_mutex);
+        
+        // Update system state
+        k_mutex_lock(&lockbox_mutex, K_FOREVER);
         g_lockbox_state.state = STATE_READY;
         g_lockbox_state.failed_attempts = 0;
+        strncpy(g_lockbox_state.current_user, user_id, MAX_USER_ID_LEN - 1);
+        strncpy(current_username, user_id, MAX_USER_ID_LEN - 1);
         k_mutex_unlock(&lockbox_mutex);
         
         add_transaction(TX_PASSCODE_VERIFIED, user_id, "Access granted");
@@ -748,6 +867,9 @@ static bool verify_passcode(const char *user_id, const char *entered_code) {
         LOG_INF("Access granted for %s", user_id);
         return true;
     } else {
+        k_mutex_unlock(&user_table_mutex);
+        
+        k_mutex_lock(&lockbox_mutex, K_FOREVER);
         g_lockbox_state.failed_attempts++;
         
         if (g_lockbox_state.failed_attempts >= MAX_FAILED_ATTEMPTS) {
@@ -755,15 +877,20 @@ static bool verify_passcode(const char *user_id, const char *entered_code) {
             g_lockbox_state.system_locked = true;
             k_mutex_unlock(&lockbox_mutex);
             
-            add_transaction(TX_SYSTEM_LOCKED, user_id, "System locked");
+            add_transaction(TX_SYSTEM_LOCKED, user_id, "System locked - too many failures");
             lock_close();
             notify_lock_status(false);
             notify_user_status();
+            
+            LOG_ERR("System locked due to failed attempts by %s", user_id);
         } else {
-            g_lockbox_state.state = STATE_READY;
             k_mutex_unlock(&lockbox_mutex);
             notify_user_status();
         }
+        
+        add_transaction(TX_PASSCODE_FAILED, user_id, "Invalid passcode");
+        LOG_WRN("Failed passcode attempt for %s (%d/%d)", 
+                user_id, g_lockbox_state.failed_attempts, MAX_FAILED_ATTEMPTS);
         return false;
     }
 }
@@ -878,9 +1005,10 @@ static ssize_t write_username(struct bt_conn *conn, const struct bt_gatt_attr *a
         set_connection_type(conn, CLIENT_TYPE_PC, "PC_CLIENT");
     }
     
-    memset(current_username, 0, MAX_USER_ID_LEN);
-    memcpy(current_username, buf, len);
-    current_username[len] = '\0';
+    char username[MAX_USER_ID_LEN];
+    memset(username, 0, MAX_USER_ID_LEN);
+    memcpy(username, buf, len);
+    username[len] = '\0';
     
     update_connection_activity(conn);
     
@@ -889,13 +1017,10 @@ static ssize_t write_username(struct bt_conn *conn, const struct bt_gatt_attr *a
     k_mutex_unlock(&lockbox_mutex);
     
     if (current_state == STATE_WAITING_PASSCODE) {
-        generate_passcode(current_username);
-        LOG_INF("BLE: Username set to: %s (passcode generated - presence detected)", current_username);
+        generate_passcode(username);
+        LOG_INF("BLE: Username set to: %s (passcode generated - multi-user mode)", username);
     } else {
-        k_mutex_lock(&lockbox_mutex, K_FOREVER);
-        strcpy(g_lockbox_state.current_user, current_username);
-        k_mutex_unlock(&lockbox_mutex);
-        LOG_INF("BLE: Username set to: %s (waiting for presence detection)", current_username);
+        LOG_INF("BLE: Username received: %s (waiting for presence detection)", username);
     }
     
     return len;
@@ -1080,11 +1205,12 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
     .disconnected = disconnected,
 };
 
-// Shell commands - Updated with new tamper functionality
+// Shell commands - Updated with multi-user functionality
 static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
     k_mutex_lock(&lockbox_mutex, K_FOREVER);
     k_mutex_lock(&blockchain_mutex, K_FOREVER);
     k_mutex_lock(&connections_mutex, K_FOREVER);
+    k_mutex_lock(&user_table_mutex, K_FOREVER);
     
     shell_print(sh, "=== Lockbox Status ===");
     shell_print(sh, "State: %s", 
@@ -1097,8 +1223,11 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
     shell_print(sh, "Failed Attempts: %u/3", g_lockbox_state.failed_attempts);
     shell_print(sh, "System Locked: %s", g_lockbox_state.system_locked ? "YES" : "NO");
     shell_print(sh, "Tamper Detected: %s", g_lockbox_state.tamper_detected ? "YES" : "NO");
-    shell_print(sh, "System Shutdown: %s", g_lockbox_state.system_shutdown ? "YES" : "NO");  // NEW
+    shell_print(sh, "System Shutdown: %s", g_lockbox_state.system_shutdown ? "YES" : "NO");
     shell_print(sh, "Lock Status: %s", lock_is_open() ? "OPEN" : "CLOSED");
+    
+    shell_print(sh, "\n=== Multi-User Status ===");
+    shell_print(sh, "Active Users: %d/%d", g_user_table.active_user_count, MAX_USERS);
     
     shell_print(sh, "\n=== VOC Sensor Status ===");
     shell_print(sh, "Current VOC: %u PPB", current_voc_value);
@@ -1125,8 +1254,9 @@ static int cmd_status(const struct shell *sh, size_t argc, char **argv) {
     shell_print(sh, "\n=== Blockchain Status ===");
     shell_print(sh, "Total Blocks: %u", g_blockchain.total_blocks);
     shell_print(sh, "Latest Hash: 0x%08x", g_blockchain.latest_hash);
-    shell_print(sh, "Shutdown Requested: %s", system_shutdown_requested ? "YES" : "NO");  // NEW
+    shell_print(sh, "Shutdown Requested: %s", system_shutdown_requested ? "YES" : "NO");
     
+    k_mutex_unlock(&user_table_mutex);
     k_mutex_unlock(&connections_mutex);
     k_mutex_unlock(&blockchain_mutex);
     k_mutex_unlock(&lockbox_mutex);
@@ -1150,6 +1280,7 @@ static int cmd_trigger_tamper(const struct shell *sh, size_t argc, char **argv) 
     return 0;
 }
 
+// Updated multi-user generate_passcode command
 static int cmd_generate_passcode(const struct shell *sh, size_t argc, char **argv) {
     if (system_shutdown_requested) {
         shell_error(sh, "System shutdown - operation not permitted");
@@ -1161,15 +1292,26 @@ static int cmd_generate_passcode(const struct shell *sh, size_t argc, char **arg
         return -EINVAL;
     }
     
-    strcpy(current_username, argv[1]);
-    
+    // Set system to waiting state if not already
     k_mutex_lock(&lockbox_mutex, K_FOREVER);
-    strcpy(g_lockbox_state.current_user, argv[1]);
-    g_lockbox_state.state = STATE_WAITING_PASSCODE;
+    if (g_lockbox_state.state == STATE_READY) {
+        g_lockbox_state.state = STATE_WAITING_PASSCODE;
+    }
     k_mutex_unlock(&lockbox_mutex);
     
     generate_passcode(argv[1]);
-    shell_print(sh, "Passcode generated for user: %s", argv[1]);
+    
+    k_mutex_lock(&user_table_mutex, K_FOREVER);
+    int user_index = find_user_index(argv[1]);
+    if (user_index >= 0) {
+        shell_print(sh, "Passcode generated for user: %s", argv[1]);
+        shell_print(sh, "Passcode: %s", g_user_table.users[user_index].passcode);
+        shell_print(sh, "Active users: %d", g_user_table.active_user_count);
+    } else {
+        shell_error(sh, "Failed to generate passcode for user: %s", argv[1]);
+    }
+    k_mutex_unlock(&user_table_mutex);
+    
     shell_print(sh, "System state set to WAITING_PASSCODE");
     shell_print(sh, "BLE clients notified of status change");
     return 0;
@@ -1189,9 +1331,7 @@ static int cmd_detect_presence(const struct shell *sh, size_t argc, char **argv)
         
         k_mutex_unlock(&lockbox_mutex);
         
-        const char* user_for_log = strlen(g_lockbox_state.current_user) > 0 ? 
-                                  g_lockbox_state.current_user : "UNKNOWN";
-        add_transaction(TX_PRESENCE_DETECTED, user_for_log, "Manual presence detection");
+        add_transaction(TX_PRESENCE_DETECTED, "SYSTEM", "Manual presence detection");
         
         k_mutex_lock(&lockbox_mutex, K_FOREVER);
         g_lockbox_state.state = STATE_WAITING_PASSCODE;
@@ -1223,9 +1363,53 @@ static int cmd_enter_passcode(const struct shell *sh, size_t argc, char **argv) 
     }
     
     bool success = verify_passcode(argv[1], argv[2]);
-    shell_print(sh, "Passcode verification: %s", success ? "SUCCESS" : "FAILED");
+    shell_print(sh, "Passcode verification for %s: %s", argv[1], success ? "SUCCESS" : "FAILED");
     shell_print(sh, "BLE clients notified of status change");
     
+    return 0;
+}
+
+// New multi-user management commands
+static int cmd_show_users(const struct shell *sh, size_t argc, char **argv) {
+    k_mutex_lock(&user_table_mutex, K_FOREVER);
+    
+    cleanup_expired_passcodes(); // Clean up first
+    
+    shell_print(sh, "=== Active Users ===");
+    shell_print(sh, "Total active: %d/%d", g_user_table.active_user_count, MAX_USERS);
+    
+    if (g_user_table.active_user_count == 0) {
+        shell_print(sh, "No users with active passcodes");
+    } else {
+        for (int i = 0; i < MAX_USERS; i++) {
+            if (g_user_table.users[i].is_active) {
+                uint32_t age = k_uptime_get_32() - g_user_table.users[i].timestamp;
+                uint32_t remaining = (age < PASSCODE_EXPIRE_TIME_MS) ? 
+                                   (PASSCODE_EXPIRE_TIME_MS - age) / 1000 : 0;
+                
+                shell_print(sh, "User: %s, Passcode: %s, Expires in: %u seconds", 
+                           g_user_table.users[i].user_id,
+                           g_user_table.users[i].passcode,
+                           remaining);
+            }
+        }
+    }
+    
+    k_mutex_unlock(&user_table_mutex);
+    return 0;
+}
+
+static int cmd_clear_users(const struct shell *sh, size_t argc, char **argv) {
+    if (system_shutdown_requested) {
+        shell_error(sh, "System shutdown - operation not permitted");
+        return -ESHUTDOWN;
+    }
+    
+    k_mutex_lock(&user_table_mutex, K_FOREVER);
+    memset(&g_user_table, 0, sizeof(user_table_t));
+    k_mutex_unlock(&user_table_mutex);
+    
+    shell_print(sh, "All user passcodes cleared");
     return 0;
 }
 
@@ -1317,7 +1501,7 @@ static int cmd_blockchain_stats(const struct shell *sh, size_t argc, char **argv
                 case TX_PASSCODE_FAILED: passcode_fail++; break;
                 case TX_TAMPER_DETECTED: tamper++; break;
                 case TX_SYSTEM_LOCKED: locked++; break;
-                case TX_SYSTEM_SHUTDOWN: shutdown++; break;  // NEW
+                case TX_SYSTEM_SHUTDOWN: shutdown++; break;
                 default: break;
             }
         }
@@ -1329,7 +1513,7 @@ static int cmd_blockchain_stats(const struct shell *sh, size_t argc, char **argv
     shell_print(sh, "Presence Events: %d", presence);
     shell_print(sh, "Tamper Events: %d", tamper);
     shell_print(sh, "System Lockouts: %d", locked);
-    shell_print(sh, "System Shutdowns: %d", shutdown);  // NEW
+    shell_print(sh, "System Shutdowns: %d", shutdown);
     
     k_mutex_unlock(&blockchain_mutex);
     return 0;
@@ -1438,12 +1622,15 @@ static int cmd_validate_blockchain(const struct shell *sh, size_t argc, char **a
     return ret;
 }
 
+// Updated shell commands with multi-user support
 SHELL_STATIC_SUBCMD_SET_CREATE(lockbox_cmds,
     SHELL_CMD(status, NULL, "Show lockbox and blockchain status", cmd_status),
     SHELL_CMD(connections, NULL, "Show BLE connection details", cmd_connections),
     SHELL_CMD(generate_passcode, NULL, "Generate passcode for user", cmd_generate_passcode),
     SHELL_CMD(detect_presence, NULL, "Simulate presence detection (user-independent)", cmd_detect_presence),
     SHELL_CMD(enter_passcode, NULL, "Enter passcode for verification", cmd_enter_passcode),
+    SHELL_CMD(show_users, NULL, "Show active users with passcodes", cmd_show_users),
+    SHELL_CMD(clear_users, NULL, "Clear all user passcodes", cmd_clear_users),
     SHELL_CMD(trigger_tamper, NULL, "Trigger tamper alert and system shutdown", cmd_trigger_tamper),
     SHELL_CMD(open_lock, NULL, "Manually open lock", cmd_open_lock),
     SHELL_CMD(close_lock, NULL, "Manually close lock", cmd_close_lock),
@@ -1535,50 +1722,59 @@ static void device_found(
     if (system_shutdown_requested) {
         return;
     }
-    
-    bool is_mac_thing = (bt_addr_le_cmp(addr, &mac_addr_thing) == 0);
 
+    // Log discovered address and RSSI
+    char addr_str[BT_ADDR_LE_STR_LEN];
+    bt_addr_le_to_str(addr, addr_str, sizeof(addr_str));
+
+    // Check for VOC sensor (mac_thing)
+    bool is_mac_thing = (bt_addr_le_cmp(addr, &mac_addr_thing) == 0);
     if (is_mac_thing) { 
         uint8_t *data = ad->data;
-        uint16_t voc_value = (data[25] << 8) | data[26];
-        
-        process_voc_reading(voc_value);
-        
-        LOG_INF("BLE: VOC data received: %d PPB", voc_value);
+
+        if (ad->len >= 27) {
+            uint16_t voc_value = (data[25] << 8) | data[26];
+            process_voc_reading(voc_value);
+            LOG_INF("BLE: VOC data received: %d PPB", voc_value);
+        } else {
+            LOG_WRN("BLE: VOC data too short (len = %u)", ad->len);
+        }
     }
 
+    // Check for Disco device
     bool is_mac_disco = (bt_addr_le_cmp(addr, &mac_addr_disco) == 0);
-
     if (is_mac_disco) {
         uint8_t *data = ad->data;
 
-        struct sensor_data m = {
-            .x  = data[18],
-            .xf = data[19],
-            .y  = data[20],
-            .yf = data[21],
-            .z  = data[22],
-            .zf = data[23]
-        };
+        if (ad->len >= 30) {
+            struct sensor_data m = {
+                .x  = data[18],
+                .xf = data[19],
+                .y  = data[20],
+                .yf = data[21],
+                .z  = data[22],
+                .zf = data[23]
+            };
 
-        struct sensor_data a = {
-            .x  = data[24],
-            .xf = data[25],
-            .y  = data[26],
-            .yf = data[27],
-            .z  = data[28],
-            .zf = data[29]
-        };
+            struct sensor_data a = {
+                .x  = data[24],
+                .xf = data[25],
+                .y  = data[26],
+                .yf = data[27],
+                .z  = data[28],
+                .zf = data[29]
+            };
 
-        LOG_INF("Magnetometer: X: %d.%02dµT Y: %d.%02dµT Z: %d.%02dµT", 
-                m.x, m.xf,
-                m.y, m.yf,
-                m.z, m.zf);
+            LOG_INF("Magnetometer: X: %d.%02dµT Y: %d.%02dµT Z: %d.%02dµT", 
+                    m.x, m.xf,
+                    m.y, m.yf,
+                    m.z, m.zf);
 
-        LOG_INF("Accelerometer: X: %d.%02dg Y: %d.%02dg Z: %d.%02dg", 
-                a.x, a.xf,
-                a.y, a.yf,
-                a.z, a.zf);
+            LOG_INF("Accelerometer: X: %d.%02dg Y: %d.%02dg Z: %d.%02dg", 
+                    a.x, a.xf,
+                    a.y, a.yf,
+                    a.z, a.zf);
+        }
     }
 }
 
@@ -1598,7 +1794,7 @@ void observer_start(void)
 }
 ////////////////////////////// BLE OBSERVER SECTION /////////////////////
 
-// Main function - Updated with shutdown monitoring
+// Main function - Updated with multi-user initialization
 int main(void) {
     int err;
 
@@ -1625,6 +1821,7 @@ int main(void) {
     k_mutex_init(&blockchain_mutex);
     k_mutex_init(&lockbox_mutex);
     k_mutex_init(&connections_mutex);
+    k_mutex_init(&user_table_mutex);  // NEW: Multi-user mutex
     k_msgq_init(&pending_tx_queue, (char *)pending_tx_buffer,
                 sizeof(simple_transaction_t), 10);
     
@@ -1632,7 +1829,8 @@ int main(void) {
     memset(&g_lockbox_state, 0, sizeof(lockbox_state_t));
     g_lockbox_state.state = STATE_READY;
     memset(connections, 0, sizeof(connections));
-    system_shutdown_requested = false;  // Initialize shutdown flag
+    memset(&g_user_table, 0, sizeof(user_table_t));  // NEW: Initialize user table
+    system_shutdown_requested = false;
     
     // Load blockchain
     ret = load_blockchain();
@@ -1657,6 +1855,7 @@ int main(void) {
     lock_init();
     
     LOG_INF("Blockchain initialized with %u blocks", g_blockchain.total_blocks);
+    LOG_INF("Multi-user system initialized - max users: %d", MAX_USERS);
 
     // Start Bluetooth
     err = bt_enable(NULL);
@@ -1680,8 +1879,13 @@ int main(void) {
         k_sleep(K_MSEC(5000));
         
         if (!system_shutdown_requested) {
-            LOG_INF("System running - VOC: %u PPB, Blocks: %u", 
-                    current_voc_value, g_blockchain.total_blocks);
+            k_mutex_lock(&user_table_mutex, K_FOREVER);
+            cleanup_expired_passcodes(); // Clean up expired passcodes periodically
+            int active_users = g_user_table.active_user_count;
+            k_mutex_unlock(&user_table_mutex);
+            
+            LOG_INF("System running - VOC: %u PPB, Blocks: %u, Active Users: %d", 
+                    current_voc_value, g_blockchain.total_blocks, active_users);
         }
     }
     
