@@ -21,6 +21,7 @@ LOCK_STATUS_CHAR_UUID = "0000cc03-0000-1000-8000-00805f9b34fb"
 USER_STATUS_CHAR_UUID = "0000dd04-0000-1000-8000-00805f9b34fb"
 PASSCODE_CHAR_UUID = "0000ee05-0000-1000-8000-00805f9b34fb"
 VOC_SENSOR_CHAR_UUID = "0000ff06-0000-1000-8000-00805f9b34fb"
+TAMPER_CONTROL_UUID =  "00001107-0000-1000-8000-00805f9b34fb"
 
 class LockboxClient:
     def __init__(self):
@@ -46,6 +47,7 @@ class LockboxClient:
             "0000dd04-0000-1000-8000-00805f9b34fb": "USER_STATUS_CHAR_UUID",
             "0000ee05-0000-1000-8000-00805f9b34fb": "PASSCODE_CHAR_UUID",
             "0000ff06-0000-1000-8000-00805f9b34fb": "VOC_SENSOR_CHAR_UUID",
+            "00001107-0000-1000-8000-00805f9b34fb": "TAMPER_CONTROL_UUID"
         }
 
         self.TAGO_DEVICE_TOKEN = "6e7a2bcf-34f1-4349-b741-590ffa35b8e8"
@@ -385,6 +387,13 @@ class LockboxClient:
         """Main function demonstrating usage"""        
         try:
             while True:
+                print("\n=== Interactive Mode ===")
+                print("Commands:")
+                print("  'username <name>' - Set username")
+                print("  'passcode <code>' - Enter passcode")
+                print("  'status' - Read all status")
+                print("  'quit' - Exit")
+
                 try:
                     cmd = await asyncio.to_thread(input, "\nEnter command: ")
                     cmd = cmd.strip().split()
