@@ -116,7 +116,6 @@ typedef struct {
     bool block_notifications_enabled;
 } connection_info_t;
 
-// Multi-user support structures
 typedef struct {
     char user_id[MAX_USER_ID_LEN];
     char passcode[PASSCODE_LEN + 1]; 
@@ -128,6 +127,26 @@ typedef struct {
     user_entry_t users[MAX_USERS];
     int active_user_count;
 } user_table_t;
+
+// Bluetooth stuff
+static const bt_addr_le_t mac_addr_thing = {
+    .type = BT_ADDR_LE_RANDOM,
+    .a = {.val = {0xFF, 0xAA, 0xFF, 0xAA, 0xFF, 0xDA}}
+};
+
+static const bt_addr_le_t mac_addr_disco = {
+    .type = BT_ADDR_LE_RANDOM,
+    .a = {.val = {0xFF, 0xCC, 0xBB, 0xCC, 0xBB, 0xDA}}
+};
+
+struct sensor_data {
+    int x;
+    int y;
+    int z;
+    int xf;
+    int yf;
+    int zf;
+};
 
 static blockchain_data_t g_blockchain;
 static lockbox_state_t g_lockbox_state = {0};
@@ -142,11 +161,16 @@ static user_table_t g_user_table = {0};
 static struct k_mutex user_table_mutex;
 
 #define VOC_PRESENCE_THRESHOLD 250
+#define MAG_PRESENCE_THRESHOLD 250
+#define ACC_PRESENCE_THRESHOLD 250
 static connection_info_t connections[MAX_BLE_CONNECTIONS];
 static struct k_mutex connections_mutex;
 
 static uint16_t current_voc_value = 0;
 static uint32_t last_voc_timestamp = 0;
+
+static uint16_t current_avg_acc_value = 0;
+static uint16_t current_avg_mag_value = 0;
 
 // Global shutdown flag for threads
 static volatile bool system_shutdown_requested = false;
@@ -782,8 +806,6 @@ static void process_voc_reading(uint16_t voc_ppb) {
     current_voc_value = voc_ppb;
     last_voc_timestamp = k_uptime_get_32();
     
-    LOG_INF("VOC reading: %u PPB", voc_ppb);
-    
     notify_voc_data(voc_ppb);
     
     if (voc_ppb > VOC_PRESENCE_THRESHOLD) {
@@ -811,6 +833,23 @@ static void process_voc_reading(uint16_t voc_ppb) {
             LOG_DBG("VOC threshold exceeded but system not ready (state: %d)", g_lockbox_state.state);
             k_mutex_unlock(&lockbox_mutex);
         }
+    }
+}
+
+static void process_tamper_reading(struct sensor_data a, struct sensor_data m) {
+    if (system_shutdown_requested) {
+        return;
+    }
+    
+    current_avg_acc_value = a.x + a.y + a.z / 3;
+    current_avg_mag_value = m.x + m.y + m.z / 3;
+
+    if (current_avg_acc_value > ACC_PRESENCE_THRESHOLD) {
+        trigger_system_shutdown("ACCELOROMETER TAMPER");
+    }
+
+    if (current_avg_mag_value > MAG_PRESENCE_THRESHOLD) {
+        trigger_system_shutdown("MAGNOMETER TAMPER");
     }
 }
 
@@ -1693,24 +1732,6 @@ static int validate_blockchain(void) {
 }
 
 ////////////////////////////// BLE OBSERVER SECTION /////////////////////
-static const bt_addr_le_t mac_addr_thing = {
-    .type = BT_ADDR_LE_RANDOM,
-    .a = {.val = {0xFF, 0xAA, 0xFF, 0xAA, 0xFF, 0xDA}}
-};
-
-static const bt_addr_le_t mac_addr_disco = {
-    .type = BT_ADDR_LE_RANDOM,
-    .a = {.val = {0xFF, 0xCC, 0xBB, 0xCC, 0xBB, 0xDA}}
-};
-
-struct sensor_data {
-    int x;
-    int y;
-    int z;
-    int xf;
-    int yf;
-    int zf;
-};
 
 static void device_found(
     const bt_addr_le_t *addr, 
@@ -1764,6 +1785,8 @@ static void device_found(
                 .z  = data[28],
                 .zf = data[29]
             };
+
+            process_tamper_reading(a, m);
 
             LOG_INF("Magnetometer: X: %d.%02dµT Y: %d.%02dµT Z: %d.%02dµT", 
                     m.x, m.xf,

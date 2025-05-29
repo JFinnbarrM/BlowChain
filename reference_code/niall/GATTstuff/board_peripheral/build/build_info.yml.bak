@@ -1,0 +1,4 @@
+west:
+  command: /home/james/zephyr_install/env/bin/west build -b nrf52840dk/nrf52840 --pristine
+  topdir: /home/james/repo
+  version: 1.3.0
