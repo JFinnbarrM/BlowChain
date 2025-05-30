@@ -1,3 +1,5 @@
+![image](https://github.com/user-attachments/assets/62506754-4f6f-43da-bdd4-12d4e049f43e)
+
 # BlowChain: LockBox
 
 Authors: James McAuley, Niall Waller, Dhanan Balasaravanan
